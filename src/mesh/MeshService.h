@@ -25,7 +25,9 @@
 #endif
 
 extern Allocator<meshtastic_QueueStatus> &queueStatusPool;
+#if !MESHTASTIC_EXCLUDE_MQTT
 extern Allocator<meshtastic_MqttClientProxyMessage> &mqttClientProxyMessagePool;
+#endif
 extern Allocator<meshtastic_ClientNotification> &clientNotificationPool;
 
 /**
@@ -55,11 +57,13 @@ class MeshService
     StaticPointerQueue<meshtastic_QueueStatus, MAX_RX_QUEUESTATUS_TOPHONE> toPhoneQueueStatusQueue;
 #endif
 
-    // keep list of MqttClientProxyMessages to be send to the client for delivery
+// keep list of MqttClientProxyMessages to be send to the client for delivery
+#if !MESHTASTIC_EXCLUDE_MQTT
 #ifdef ARCH_PORTDUINO
     PointerQueue<meshtastic_MqttClientProxyMessage> toPhoneMqttProxyQueue;
 #else
     StaticPointerQueue<meshtastic_MqttClientProxyMessage, MAX_RX_MQTTPROXY_TOPHONE> toPhoneMqttProxyQueue;
+#endif
 #endif
 
     // keep list of ClientNotifications to be send to the client (phone)
@@ -128,8 +132,10 @@ class MeshService
     /// Return the next QueueStatus packet destined to the phone.
     meshtastic_QueueStatus *getQueueStatusForPhone() { return toPhoneQueueStatusQueue.dequeuePtr(0); }
 
+#if !MESHTASTIC_EXCLUDE_MQTT
     /// Return the next MqttClientProxyMessage packet destined to the phone.
     meshtastic_MqttClientProxyMessage *getMqttClientProxyMessageForPhone() { return toPhoneMqttProxyQueue.dequeuePtr(0); }
+#endif
 
     /// Return the next ClientNotification packet destined to the phone.
     meshtastic_ClientNotification *getClientNotificationForPhone() { return toPhoneClientNotificationQueue.dequeuePtr(0); }
@@ -140,8 +146,10 @@ class MeshService
     // Release QueueStatus packet to pool
     void releaseQueueStatusToPool(meshtastic_QueueStatus *p) { queueStatusPool.release(p); }
 
+#if !MESHTASTIC_EXCLUDE_MQTT
     // Release MqttClientProxyMessage packet to pool
     void releaseMqttClientProxyMessageToPool(meshtastic_MqttClientProxyMessage *p) { mqttClientProxyMessagePool.release(p); }
+#endif
 
     /// Release the next ClientNotification packet to pool.
     void releaseClientNotificationToPool(meshtastic_ClientNotification *p) { clientNotificationPool.release(p); }
@@ -192,8 +200,10 @@ class MeshService
     /// Send a packet to the phone
     void sendToPhone(meshtastic_MeshPacket *p);
 
+#if !MESHTASTIC_EXCLUDE_MQTT
     /// Send an MQTT message to the phone for client proxying
     virtual void sendMqttMessageToClientProxy(meshtastic_MqttClientProxyMessage *m);
+#endif
 
     /// Send a ClientNotification to the phone
     virtual void sendClientNotification(meshtastic_ClientNotification *cn);

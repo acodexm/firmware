@@ -49,28 +49,41 @@ the new node can build its node db)
 
 MeshService *service;
 
+#ifndef MAX_MQTT_PROXY_MESSAGES
 #define MAX_MQTT_PROXY_MESSAGES 16
+#endif
+#if !MESHTASTIC_EXCLUDE_MQTT
 static MemoryPool<meshtastic_MqttClientProxyMessage, MAX_MQTT_PROXY_MESSAGES> staticMqttClientProxyMessagePool;
+#endif
 
+#ifndef MAX_QUEUE_STATUS
 #define MAX_QUEUE_STATUS 4
+#endif
 static MemoryPool<meshtastic_QueueStatus, MAX_QUEUE_STATUS> staticQueueStatusPool;
 
+#ifndef MAX_CLIENT_NOTIFICATIONS
 #define MAX_CLIENT_NOTIFICATIONS 4
+#endif
 static MemoryPool<meshtastic_ClientNotification, MAX_CLIENT_NOTIFICATIONS> staticClientNotificationPool;
-
-Allocator<meshtastic_MqttClientProxyMessage> &mqttClientProxyMessagePool = staticMqttClientProxyMessagePool;
 
 Allocator<meshtastic_ClientNotification> &clientNotificationPool = staticClientNotificationPool;
 
 Allocator<meshtastic_QueueStatus> &queueStatusPool = staticQueueStatusPool;
 
 #include "PositionPrecision.h"
+#if !MESHTASTIC_EXCLUDE_MQTT
+Allocator<meshtastic_MqttClientProxyMessage> &mqttClientProxyMessagePool = staticMqttClientProxyMessagePool;
+#endif
+
 #include "Router.h"
 
 MeshService::MeshService()
 #ifdef ARCH_PORTDUINO
     : toPhoneQueue(MAX_RX_TOPHONE), toPhoneQueueStatusQueue(MAX_RX_QUEUESTATUS_TOPHONE),
-      toPhoneMqttProxyQueue(MAX_RX_MQTTPROXY_TOPHONE), toPhoneClientNotificationQueue(MAX_RX_NOTIFICATION_TOPHONE)
+#if !MESHTASTIC_EXCLUDE_MQTT
+      toPhoneMqttProxyQueue(MAX_RX_MQTTPROXY_TOPHONE),
+#endif
+      toPhoneClientNotificationQueue(MAX_RX_NOTIFICATION_TOPHONE)
 #endif
 {
     lastQueueStatus = {0, 0, 16, 0};
@@ -477,6 +490,7 @@ void MeshService::sendToPhone(meshtastic_MeshPacket *p)
     fromNum++;
 }
 
+#if !MESHTASTIC_EXCLUDE_MQTT
 void MeshService::sendMqttMessageToClientProxy(meshtastic_MqttClientProxyMessage *m)
 {
     LOG_DEBUG("Send mqtt message on topic '%s' to client for proxy", m->topic);
@@ -494,6 +508,7 @@ void MeshService::sendMqttMessageToClientProxy(meshtastic_MqttClientProxyMessage
     }
     fromNum++;
 }
+#endif
 
 void MeshService::sendRoutingErrorResponse(meshtastic_Routing_Error error, const meshtastic_MeshPacket *mp)
 {

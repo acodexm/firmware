@@ -56,7 +56,12 @@
 
 XModemAdapter xModem;
 
+#if defined(ARCH_NRF52)
+// Adafruit nRF52 LittleFS requires a filesystem-bound File; it has no zero-arg constructor.
+XModemAdapter::XModemAdapter() : file(FSCom) {}
+#else
 XModemAdapter::XModemAdapter() {}
+#endif
 
 bool XModemAdapter::isValidFilename(const char *name)
 {
