@@ -833,7 +833,8 @@ void AdminModule::handleSetOwner(const meshtastic_User &o)
     if (changed) { // If nothing really changed, don't broadcast on the network or write to flash
         service->reloadOwner(!hasOpenEditTransaction);
         saveChanges(SEGMENT_DEVICESTATE | SEGMENT_NODEDATABASE | (identityUpdated ? SEGMENT_CONFIG : 0) |
-                    (channelsSanitized ? SEGMENT_CHANNELS : 0));
+                        (channelsSanitized ? SEGMENT_CHANNELS : 0),
+                    false);
     }
 }
 
