@@ -62,12 +62,12 @@ static BluetoothPhoneAPI *bluetoothPhoneAPI;
 
 void onConnect(uint16_t conn_handle)
 {
-    // Get the reference to current connection
-    BLEConnection *connection = Bluefruit.Connection(conn_handle);
+    // Do not call BLEConnection::getPeerName() here. Bluefruit implements it as
+    // a synchronous remote GATT read which waits for another BLE event. Running
+    // that wait from the connect callback can deadlock the AdaCallback BLE task,
+    // preventing pairing, logging, disconnect handling, and advertising recovery.
     connectionHandle = conn_handle;
-    char central_name[32] = {0};
-    connection->getPeerName(central_name, sizeof(central_name));
-    LOG_INFO("BLE Connected to %s", central_name);
+    LOG_INFO("BLE connect callback, handle=%u", static_cast<unsigned>(conn_handle));
 
     // A new physical link must start unauthenticated. The auth slot is keyed by
     // the (single, reused) bluetoothPhoneAPI instance, so a prior session's
@@ -411,6 +411,7 @@ void NRF52Bluetooth::onConnectionSecured(uint16_t conn_handle)
 }
 bool NRF52Bluetooth::onPairingPasskey(uint16_t conn_handle, uint8_t const passkey[6], bool match_request)
 {
+    (void)conn_handle;
     char passkey1[4] = {passkey[0], passkey[1], passkey[2], '\0'};
     char passkey2[4] = {passkey[3], passkey[4], passkey[5], '\0'};
     LOG_INFO("BLE pair process started with passkey %s %s", passkey1, passkey2);
@@ -444,13 +445,10 @@ bool NRF52Bluetooth::onPairingPasskey(uint16_t conn_handle, uint8_t const passke
 #endif
     passkeyShowing = true;
 
-    if (match_request) {
-        uint32_t start_time = millis();
-        while (millis() < start_time + 30000) {
-            if (!Bluefruit.connected(conn_handle))
-                break;
-        }
-    }
+    // Bluefruit sends the numeric-comparison reply only after this callback returns.
+    // There is no local confirmation input here, so accept immediately. Busy-waiting
+    // in the higher-priority AdaCallback task starves the main loop (and its watchdog
+    // feed), while also guaranteeing that Android times out before it gets our reply.
     LOG_INFO("BLE passkey pair: match_request=%i", match_request);
     return true;
 }
