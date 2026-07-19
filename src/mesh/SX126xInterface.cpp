@@ -369,14 +369,14 @@ template <typename T> void SX126xInterface<T>::startReceive()
     int err = lora.startReceiveDutyCycleAuto(preambleLength, 8, MESHTASTIC_RADIOLIB_IRQ_RX_FLAGS);
     const char *rxMethod = "startReceiveDutyCycleAuto";
 #endif
-    if (err != RADIOLIB_ERR_NONE)
-        LOG_ERROR("SX126X %s %s%d", rxMethod, radioLibErr, err);
+    if (err != RADIOLIB_ERR_NONE) {
+        LOG_ERROR("SX126X %s %s%d; radio receive disabled", rxMethod, radioLibErr, err);
 #ifdef ARCH_PORTDUINO
-    if (err != RADIOLIB_ERR_NONE)
         portduino_status.LoRa_in_error = true;
-#else
-    assert(err == RADIOLIB_ERR_NONE);
 #endif
+        disableInterrupt();
+        return;
+    }
 
     RadioLibInterface::startReceive();
 
