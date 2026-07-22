@@ -101,8 +101,19 @@ template <typename T> bool SX126xInterface<T>::init()
 #endif
     // \todo Display actual typename of the adapter, not just `SX126x`
     LOG_INFO("SX126x init result %d", res);
-    if (res == RADIOLIB_ERR_CHIP_NOT_FOUND || res == RADIOLIB_ERR_SPI_CMD_FAILED)
+    if (res != RADIOLIB_ERR_NONE) {
+        // `-20` means the LoRa packet type did not stick. These values make
+        // SX126x command-path failures diagnosable without guessing whether
+        // the module is an XTAL, TCXO, or RF-switch variant.
+        uint8_t packetType = 0xFF;
+        uint8_t deviceErrorBytes[2] = {0xFF, 0xFF};
+        module.SPIreadStream(RADIOLIB_SX126X_CMD_GET_PACKET_TYPE, &packetType, sizeof(packetType));
+        module.SPIreadStream(RADIOLIB_SX126X_CMD_GET_DEVICE_ERRORS, deviceErrorBytes, sizeof(deviceErrorBytes));
+        const uint16_t deviceErrors = (static_cast<uint16_t>(deviceErrorBytes[0]) << 8) | deviceErrorBytes[1];
+        LOG_ERROR("SX126x init failed: result=%d packet_type=0x%02x errors=0x%04x busy=%d", res, packetType, deviceErrors,
+                  digitalRead(module.getGpio()));
         return false;
+    }
 
     LOG_INFO("Frequency set to %f", getFreq());
     LOG_INFO("Bandwidth set to %f", bw);
