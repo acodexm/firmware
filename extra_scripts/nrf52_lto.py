@@ -74,18 +74,31 @@ LIB_ISR = ("/bluefruit.cpp", "/Wire_nRF52.cpp", "/PDM.cpp", "/RotaryEncoder.cpp"
 _PROJECT_VARIANTS = (
     env.subst("$PROJECT_DIR").replace("\\", "/").rstrip("/") + "/variants/"
 )
+_project_dir = env.subst("$PROJECT_DIR").replace("\\", "/").rstrip("/")
+_nested_main = _project_dir + "/meshtastic-firmware/src/main.cpp"
+_MESHTASTIC_MAIN = (
+    _nested_main if os.path.isfile(_nested_main) else _project_dir + "/src/main.cpp"
+)
+
+
+def _source_path(node, fallback):
+    try:
+        return node.srcnode().get_abspath().replace("\\", "/")
+    except Exception:
+        return fallback.replace("\\", "/")
 
 
 def _is_board_variant(node, path):
-    try:
-        src = node.srcnode().get_abspath().replace("\\", "/")
-    except Exception:
-        src = path
+    src = _source_path(node, path)
     return (
         src.endswith("/variant.cpp")
         and src.startswith(_PROJECT_VARIANTS)
         and "extra_variants" not in src
     )
+
+
+def _is_meshtastic_main(node, path):
+    return _source_path(node, path) == _MESHTASTIC_MAIN
 
 
 # projenv is the construction env PlatformIO uses to compile project sources (src/ + the board
@@ -133,7 +146,7 @@ def _no_lto(node):
             CCFLAGS=env["CCFLAGS"] + ["-fno-lto"],
             CPPPATH=env["CPPPATH"] + _extra_inc,
         )
-    if _is_board_variant(node, path):
+    if _is_board_variant(node, path) or _is_meshtastic_main(node, path):
         # The board variant is a project source, not a framework object: it can #include
         # configuration.h/sleep.h, which need the -DAPP_VERSION... define and the generated-
         # protobuf include path (pb.h). Recompile it with projenv, which carries both.
@@ -235,17 +248,24 @@ def _assert_isr_handlers_survived(source, target, env):
 #   2. any override the object defines strong must resolve strong in the ELF.
 _VARIANT_OVERRIDES = (
     "_Z11initVariantv",
-)  # extend if the core grows more weak variant hooks
+    "_Z15lateInitVariantv",
+)
 
 
 def _assert_variant_survived(source, target, env):
     import subprocess
     import sys
 
-    objs = glob.glob(
-        os.path.join(env.subst("$BUILD_DIR"), "variants", "**", "variant.cpp.o"),
-        recursive=True,
-    )
+    objs = [
+        obj
+        for obj in glob.glob(
+            os.path.join(
+                env.subst("$BUILD_DIR"), "**", "variants", "**", "variant.cpp.o"
+            ),
+            recursive=True,
+        )
+        if "extra_variants" not in obj.replace("\\", "/")
+    ]
     if not objs:
         return  # env links no in-repo board variant
     problems = []
@@ -294,7 +314,7 @@ def _assert_variant_survived(source, target, env):
     if problems:
         sys.stderr.write(
             "\n*** nrf52 LTO guard: board variant DROPPED from the image ***\n%s\n"
-            "The variant's early hardware setup (initVariant) will never run on this board.\n"
+            "One or more board hooks (initVariant/lateInitVariant) will never run.\n"
             "Check _is_board_variant() in extra_scripts/nrf52_lto.py -- middleware nodes are\n"
             "$BUILD_DIR-mirrored; match srcnode() paths, not node.get_abspath().\n\n"
             % "\n".join("  - " + p for p in problems)
