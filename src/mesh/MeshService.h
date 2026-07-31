@@ -112,6 +112,9 @@ class MeshService
     /// Called when some new packets have arrived from one of the radios
     Observable<uint32_t> fromNumChanged;
 
+    /// Called after a client-origin packet has entered the local mesh send path.
+    Observable<const meshtastic_MeshPacket *> toRadioPacketAccepted;
+
     /// Called when radio config has changed (radios should observe this and set their hardware as required)
     Observable<void *> configChanged;
 

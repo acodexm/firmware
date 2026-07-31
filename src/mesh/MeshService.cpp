@@ -301,6 +301,7 @@ void MeshService::handleToRadio(meshtastic_MeshPacket &p)
         return;
     }
     sendToMesh(a, RX_SRC_USER);
+    toRadioPacketAccepted.notifyObservers(&p);
 
     bool loopback = false; // if true send any packet the phone sends back itself (for testing)
     if (loopback) {
