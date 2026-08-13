@@ -113,13 +113,17 @@ class GPSStatus : public Status
         hasLock = newStatus->hasLock;
         isConnected = newStatus->isConnected;
 
+        // A stationary receiver still produces fresh solutions. Keep freshness
+        // independent from observer dirtiness so consumers can reject cached fixes
+        // without forcing position/UI notifications every second.
+        if (hasLock) {
+            lastFixMillis = millis();
+        }
+
         p = newStatus->p;
 
         if (isDirty) {
             if (hasLock) {
-                // Record time of last valid GPS fix
-                lastFixMillis = millis();
-
                 // In debug logs, identify position by @timestamp:stage (stage 3 = notify)
                 LOG_DEBUG("New GPS pos@%x:3 lat=%f lon=%f alt=%d pdop=%.2f track=%.2f speed=%.2f sats=%d", p.timestamp,
                           p.latitude_i * 1e-7, p.longitude_i * 1e-7, p.altitude, p.PDOP * 1e-2, p.ground_track * 1e-5,
