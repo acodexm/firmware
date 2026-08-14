@@ -9,6 +9,7 @@
 #include "mesh/PhoneAPI.h"
 #include "mesh/Throttle.h"
 #include "mesh/mesh-pb-constants.h"
+#include <atomic>
 #include <bluefruit.h>
 #include <utility/bonding.h>
 static BLEService meshBleService = BLEService(BLEUuid(MESH_SERVICE_UUID_16));
@@ -38,6 +39,18 @@ static uint8_t lastToRadio[MAX_TO_FROM_RADIO_SIZE];
 static uint16_t connectionHandle;
 static bool passkeyShowing;
 
+enum class LogSubscriptionMode : uint8_t {
+    Disabled = 0,
+    Notify = BLE_GATT_HVX_NOTIFICATION,
+    Indicate = BLE_GATT_HVX_INDICATION,
+};
+
+// Reading a CCCD uses a SoftDevice call. Logging happens from many firmware
+// threads, including BLE callbacks, so querying it for every log record can
+// re-enter or race the SoftDevice during disconnect. The CCCD callback owns
+// this cached state; log producers only perform an atomic load.
+static std::atomic<LogSubscriptionMode> logSubscriptionMode{LogSubscriptionMode::Disabled};
+
 class BluetoothPhoneAPI : public PhoneAPI
 {
     /**
@@ -66,6 +79,7 @@ void onConnect(uint16_t conn_handle)
     // a synchronous remote GATT read which waits for another BLE event. Running
     // that wait from the connect callback can deadlock the AdaCallback BLE task,
     // preventing pairing, logging, disconnect handling, and advertising recovery.
+    logSubscriptionMode.store(LogSubscriptionMode::Disabled, std::memory_order_release);
     connectionHandle = conn_handle;
     LOG_INFO("BLE connect callback, handle=%u", static_cast<unsigned>(conn_handle));
 
@@ -90,6 +104,7 @@ void onConnect(uint16_t conn_handle)
  */
 void onDisconnect(uint16_t conn_handle, uint8_t reason)
 {
+    logSubscriptionMode.store(LogSubscriptionMode::Disabled, std::memory_order_release);
     LOG_INFO("BLE Disconnected, reason = 0x%x", reason);
     if (bluetoothPhoneAPI) {
         bluetoothPhoneAPI->close();
@@ -114,6 +129,13 @@ void onDisconnect(uint16_t conn_handle, uint8_t reason)
 }
 void onCccd(uint16_t conn_hdl, BLECharacteristic *chr, uint16_t cccd_value)
 {
+    if (chr->uuid == logRadio.uuid) {
+        const auto mode = (cccd_value & BLE_GATT_HVX_INDICATION) != 0     ? LogSubscriptionMode::Indicate
+                          : (cccd_value & BLE_GATT_HVX_NOTIFICATION) != 0 ? LogSubscriptionMode::Notify
+                                                                          : LogSubscriptionMode::Disabled;
+        logSubscriptionMode.store(mode, std::memory_order_release);
+    }
+
     // Display the raw request packet
     LOG_INFO("CCCD Updated: %u", cccd_value);
     // Check the characteristic this CCCD update is associated with in case
@@ -507,10 +529,16 @@ void NRF52Bluetooth::onPairingCompleted(uint16_t conn_handle, uint8_t auth_statu
 
 void NRF52Bluetooth::sendLog(const uint8_t *logMessage, size_t length)
 {
-    if (!isConnected() || length > 512)
+    const auto mode = logSubscriptionMode.load(std::memory_order_acquire);
+    if (!isConnected() || mode == LogSubscriptionMode::Disabled || length > 512)
         return;
-    if (logRadio.indicateEnabled())
+    if (mode == LogSubscriptionMode::Indicate)
         logRadio.indicate(logMessage, (uint16_t)length);
     else
         logRadio.notify(logMessage, (uint16_t)length);
+}
+
+bool NRF52Bluetooth::isLogSubscribed() const
+{
+    return logSubscriptionMode.load(std::memory_order_acquire) != LogSubscriptionMode::Disabled;
 }

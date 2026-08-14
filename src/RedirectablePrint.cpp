@@ -224,7 +224,7 @@ void RedirectablePrint::log_to_ble(const char *logLevel, const char *format, va_
 #ifdef ARCH_ESP32
         isBleConnected = nimbleBluetooth && nimbleBluetooth->isActive() && nimbleBluetooth->isConnected();
 #elif defined(ARCH_NRF52)
-        isBleConnected = nrf52Bluetooth != nullptr && nrf52Bluetooth->isConnected();
+        isBleConnected = nrf52Bluetooth != nullptr && nrf52Bluetooth->isConnected() && nrf52Bluetooth->isLogSubscribed();
 #elif defined(ARCH_NRF54L15)
         isBleConnected = nrf54l15Bluetooth != nullptr && nrf54l15Bluetooth->isConnected();
 #endif
@@ -233,6 +233,15 @@ void RedirectablePrint::log_to_ble(const char *logLevel, const char *format, va_
             meshtastic_LogRecord logRecord = meshtastic_LogRecord_init_zero;
             logRecord.level = getLogLevel(logLevel);
             vsnprintf(logRecord.message, sizeof(logRecord.message), format, arg);
+
+            // Field recording must not turn ordinary Mesh DEBUG/INFO traffic
+            // into a competing BLE workload. Runa's structured diagnostics are
+            // tagged at the message edge; retain those and upstream warnings
+            // or errors, which are useful failure evidence.
+            const bool isRunaDiagnostic = strncmp(logRecord.message, "Runa/", 5) == 0;
+            const bool isWarningOrWorse = logRecord.level >= meshtastic_LogRecord_Level_WARNING;
+            if (!isRunaDiagnostic && !isWarningOrWorse)
+                return;
             if (thread)
                 strlcpy(logRecord.source, thread->ThreadName.c_str(), sizeof(logRecord.source));
             logRecord.time = getValidTime(RTCQuality::RTCQualityDevice, true);
