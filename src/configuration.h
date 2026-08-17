@@ -517,6 +517,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // Global switches to turn off features for a minimized build
 // -----------------------------------------------------------------------------
 
+// Keep no-radio lifecycle builds explicit. A platform may compile routing and
+// persistence code before its RadioLib transport is ready, but must not gain a
+// fake radio interface or report a missing-radio critical error in that mode.
+#ifndef MESHTASTIC_EXCLUDE_RADIO
+#define MESHTASTIC_EXCLUDE_RADIO 0
+#endif
+
 // #define MESHTASTIC_MINIMIZE_BUILD 1
 #ifdef MESHTASTIC_MINIMIZE_BUILD
 #define MESHTASTIC_EXCLUDE_MODULES 1
