@@ -79,6 +79,11 @@ void nrf54l15Loop();
 NRF54L15Bluetooth *nrf54l15Bluetooth = nullptr;
 #endif
 
+#ifdef ARCH_ZEPHYR
+#include "ZephyrBluetooth.h"
+ZephyrBluetooth *zephyrBluetooth = nullptr;
+#endif
+
 #ifdef MESHTASTIC_ENABLE_APPROTECT
 #include "security/APProtect.h"
 #endif

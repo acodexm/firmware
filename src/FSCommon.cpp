@@ -79,7 +79,7 @@ size_t fsUsedBytes()
     return (size_t)(info.capacity - info.available);
 }
 #else
-// ESP32 LittleFS and the nRF54L15 wrapper expose these directly.
+// ESP32 LittleFS and the Zephyr wrapper expose these directly.
 size_t fsTotalBytes()
 {
     return FSCom.totalBytes();

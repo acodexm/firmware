@@ -227,6 +227,8 @@ void RedirectablePrint::log_to_ble(const char *logLevel, const char *format, va_
         isBleConnected = nrf52Bluetooth != nullptr && nrf52Bluetooth->isConnected() && nrf52Bluetooth->isLogSubscribed();
 #elif defined(ARCH_NRF54L15)
         isBleConnected = nrf54l15Bluetooth != nullptr && nrf54l15Bluetooth->isConnected();
+#elif defined(ARCH_ZEPHYR)
+        isBleConnected = zephyrBluetooth != nullptr && zephyrBluetooth->isConnected();
 #endif
         if (isBleConnected) {
             auto thread = concurrency::OSThread::currentThread;
@@ -254,6 +256,8 @@ void RedirectablePrint::log_to_ble(const char *logLevel, const char *format, va_
             nrf52Bluetooth->sendLog(buffer.get(), size);
 #elif defined(ARCH_NRF54L15)
             nrf54l15Bluetooth->sendLog(buffer.get(), size);
+#elif defined(ARCH_ZEPHYR)
+            zephyrBluetooth->sendLog(buffer.get(), size);
 #endif
         }
     }

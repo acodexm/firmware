@@ -90,7 +90,7 @@ inline bool warmSignerOf(const WarmNodeEntry &e)
 
 // Gated on NRF52840_XXAA: the ring sits at 0xEA000
 // valid only on the 1 MB-flash nRF52840.
-#if defined(NRF52840_XXAA)
+#if defined(NRF52840_XXAA) && !defined(ARCH_ZEPHYR)
 #define WARM_FLASH_PAGE_SIZE 4096u
 #define WARM_FLASH_PAGES 3u
 #define WARM_FLASH_REGION_BASE (0xED000u - WARM_FLASH_PAGES * WARM_FLASH_PAGE_SIZE) // 0xEA000
@@ -172,7 +172,7 @@ class WarmNodeStore
     void persistRemove(NodeNum num, int storeSlot);
     void persistClear();
 
-#if defined(NRF52840_XXAA)
+#if defined(NRF52840_XXAA) && !defined(ARCH_ZEPHYR)
     // nRF52840 raw-flash record-ring state.
     struct WarmPageHeader {
         uint32_t magic; // WARM_RING_MAGIC
