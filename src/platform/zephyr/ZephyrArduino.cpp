@@ -7,6 +7,7 @@
 #include "Wire.h"
 #include "drivers/ZephyrBuses.h"
 
+#include <climits>
 #include <cstdarg>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
@@ -71,8 +72,23 @@ size_t HardwareSerial::write(const uint8_t *buffer, size_t size)
 {
     if (buffer == nullptr)
         return 0;
-    for (size_t i = 0; i < size; ++i)
-        printk("%c", static_cast<char>(buffer[i]));
+
+    size_t offset = 0;
+    while (offset < size) {
+        const size_t chunkSize = MIN(size - offset, static_cast<size_t>(INT_MAX));
+        const auto *chunk = reinterpret_cast<const char *>(buffer + offset);
+        const void *nul = memchr(chunk, '\0', chunkSize);
+        const size_t textSize = nul == nullptr ? chunkSize : static_cast<const char *>(nul) - chunk;
+
+        if (textSize != 0U)
+            printk("%.*s", static_cast<int>(textSize), chunk);
+        if (nul != nullptr) {
+            printk("%c", '\0');
+            offset += textSize + 1U;
+        } else {
+            offset += textSize;
+        }
+    }
     return size;
 }
 
@@ -163,10 +179,14 @@ struct PinDevice {
 
 bool resolvePin(uint32_t arduinoPin, PinDevice &resolved)
 {
-#if defined(CONFIG_SOC_SERIES_NRF52X)
+#if defined(CONFIG_SOC_SERIES_NRF52) || defined(CONFIG_SOC_COMPATIBLE_NRF52X)
     constexpr uint32_t pinsPerPort = 32;
 #else
     constexpr uint32_t pinsPerPort = 16;
+#endif
+#if defined(CONFIG_SOC_NRF52840)
+    static_assert(45U / pinsPerPort == 1U, "nRF52840 P1 pins must resolve through GPIO1");
+    static_assert(45U % pinsPerPort == 13U, "Arduino pin 45 must resolve to nRF52840 P1.13");
 #endif
     const uint32_t port = arduinoPin / pinsPerPort;
     resolved.pin = static_cast<gpio_pin_t>(arduinoPin % pinsPerPort);

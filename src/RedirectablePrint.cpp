@@ -48,6 +48,23 @@ size_t RedirectablePrint::write(uint8_t c)
               // serial port said (which could be zero)
 }
 
+size_t RedirectablePrint::write(const uint8_t *buffer, size_t size)
+{
+    if (buffer == nullptr)
+        return 0;
+
+#ifdef USE_SEGGER
+    for (size_t index = 0; index < size; ++index)
+        SEGGER_RTT_PutChar(SEGGER_STDOUT_CH, buffer[index]);
+#endif
+
+    const bool serialEnabled = config.has_security ? config.security.serial_enabled : config.device.serial_enabled;
+    if (!config.has_lora || serialEnabled)
+        dest->write(buffer, size);
+
+    return size;
+}
+
 size_t RedirectablePrint::vprintf(const char *logLevel, const char *format, va_list arg)
 {
     va_list copy;
@@ -80,17 +97,17 @@ size_t RedirectablePrint::vprintf(const char *logLevel, const char *format, va_l
     }
     if (color && logLevel != nullptr) {
         if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_DEBUG) == 0)
-            Print::write("\u001b[34m", 5);
+            write("\u001b[34m", 5);
         if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_INFO) == 0)
-            Print::write("\u001b[32m", 5);
+            write("\u001b[32m", 5);
         if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_WARN) == 0)
-            Print::write("\u001b[33m", 5);
+            write("\u001b[33m", 5);
         if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_ERROR) == 0)
-            Print::write("\u001b[31m", 5);
+            write("\u001b[31m", 5);
     }
-    len = Print::write(printBuf, len);
+    len = write(reinterpret_cast<const uint8_t *>(printBuf), len);
     if (color && logLevel != nullptr) {
-        Print::write("\u001b[0m", 4);
+        write("\u001b[0m", 4);
     }
     return len;
 }

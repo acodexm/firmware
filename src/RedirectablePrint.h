@@ -24,6 +24,8 @@ class RedirectablePrint : public Print
   public:
     explicit RedirectablePrint(Print *_dest) : dest(_dest) {}
 
+    using Print::write;
+
     /**
      * Set a new destination
      */
@@ -31,6 +33,7 @@ class RedirectablePrint : public Print
     void setDestination(Print *dest);
 
     virtual size_t write(uint8_t c);
+    size_t write(const uint8_t *buffer, size_t size) override;
 
     /**
      * Debug logging print message
