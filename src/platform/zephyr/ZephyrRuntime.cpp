@@ -65,7 +65,7 @@ void clearBonds()
     zephyrBluetooth->clearBonds();
 }
 
-void enterDfuMode()
+__attribute__((weak)) void enterDfuMode()
 {
     printk("[zephyr-runtime] DFU request falling back to a cold reboot\n");
     sys_reboot(SYS_REBOOT_COLD);
