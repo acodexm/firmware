@@ -47,6 +47,36 @@ bool joinPath(char *destination, size_t size, const char *parent, const char *na
     return length >= 0 && static_cast<size_t>(length) < size;
 }
 
+bool storagePartitionIsErased()
+{
+    const flash_area *area = nullptr;
+    if (flash_area_open(FIXED_PARTITION_ID(storage_partition), &area) != 0)
+        return false;
+
+    constexpr size_t readSize = 128;
+    uint8_t bytes[readSize];
+    const uint8_t erasedValue = flash_area_erased_val(area);
+    bool erased = true;
+    for (size_t offset = 0; offset < area->fa_size; offset += readSize) {
+        const size_t remaining = area->fa_size - offset;
+        const size_t length = remaining < readSize ? remaining : readSize;
+        if (flash_area_read(area, static_cast<off_t>(offset), bytes, length) != 0) {
+            erased = false;
+            break;
+        }
+        for (size_t index = 0; index < length; ++index) {
+            if (bytes[index] != erasedValue) {
+                erased = false;
+                break;
+            }
+        }
+        if (!erased)
+            break;
+    }
+    flash_area_close(area);
+    return erased;
+}
+
 } // namespace
 
 Adafruit_LittleFS_Namespace::InternalFileSystem InternalFS;
@@ -74,7 +104,12 @@ bool InternalFileSystem::begin()
         return true;
     }
 
-    printk("[zephyr-fs] mount failed (%d); formatting clean storage partition\n", error);
+    if (!storagePartitionIsErased()) {
+        printk("[zephyr-fs] mount failed (%d); preserving nonblank storage partition\n", error);
+        return false;
+    }
+
+    printk("[zephyr-fs] mount failed (%d); formatting erased first-boot storage partition\n", error);
     error = fs_mkfs(FS_LITTLEFS, FIXED_PARTITION_ID(storage_partition), nullptr, 0);
     if (error != 0) {
         reportFsFailure("format", error);

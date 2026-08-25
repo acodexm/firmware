@@ -25,7 +25,9 @@
 #include "concurrency/LockGuard.h"
 #include "main.h"
 #include "modules/NodeInfoModule.h"
+#ifndef MESHTASTIC_EXCLUDE_XMODEM
 #include "xmodem.h"
+#endif
 
 #if FromRadio_size > MAX_TO_FROM_RADIO_SIZE
 #error FromRadio is too big
@@ -270,7 +272,7 @@ void PhoneAPI::handleStartConfig()
     if (!isConnected()) {
         onConnectionChanged(true);
         observe(&service->fromNumChanged);
-#ifdef FSCom
+#if defined(FSCom) && !defined(MESHTASTIC_EXCLUDE_XMODEM)
         observe(&xModem.packetReady);
 #endif
 #ifdef MESHTASTIC_PHONEAPI_ACCESS_CONTROL
@@ -374,7 +376,7 @@ void PhoneAPI::close()
         state = STATE_SEND_NOTHING;
         resetReadIndex();
         unobserve(&service->fromNumChanged);
-#ifdef FSCom
+#if defined(FSCom) && !defined(MESHTASTIC_EXCLUDE_XMODEM)
         unobserve(&xModem.packetReady);
 #endif
         releasePhonePacket(); // Don't leak phone packets on shutdown
@@ -474,6 +476,7 @@ bool PhoneAPI::handleToRadio(const uint8_t *buf, size_t bufLength)
             LOG_INFO("Disconnect from phone");
             close();
             break;
+#ifndef MESHTASTIC_EXCLUDE_XMODEM
         case meshtastic_ToRadio_xmodemPacket_tag:
 #ifdef MESHTASTIC_PHONEAPI_ACCESS_CONTROL
             if (!getAdminAuthorized()) {
@@ -486,6 +489,7 @@ bool PhoneAPI::handleToRadio(const uint8_t *buf, size_t bufLength)
             xModem.handlePacket(toRadioScratch.xmodemPacket);
 #endif
             break;
+#endif
 #if !MESHTASTIC_EXCLUDE_MQTT
         case meshtastic_ToRadio_mqttClientProxyMessage_tag:
             LOG_DEBUG("Got MqttClientProxy message");
@@ -1027,6 +1031,7 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
                 releaseMqttClientProxyPhonePacket();
             }
 #endif
+#ifndef MESHTASTIC_EXCLUDE_XMODEM
         } else if (xmodemPacketForPhone.control != meshtastic_XModem_Control_NUL) {
 #ifdef MESHTASTIC_PHONEAPI_ACCESS_CONTROL
             if (!getAdminAuthorized()) {
@@ -1038,6 +1043,7 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
                 fromRadioScratch.xmodemPacket = xmodemPacketForPhone;
                 xmodemPacketForPhone = meshtastic_XModem_init_zero;
             }
+#endif
 #ifdef MESHTASTIC_PHONEAPI_ACCESS_CONTROL
         } else if (hasPendingLockdownStatus()) {
             concurrency::LockGuard guard(&g_authSlotsMutex);
@@ -1669,7 +1675,7 @@ bool PhoneAPI::available()
         if (hasPacket)
             return true;
 
-#ifdef FSCom
+#if defined(FSCom) && !defined(MESHTASTIC_EXCLUDE_XMODEM)
         if (xmodemPacketForPhone.control == meshtastic_XModem_Control_NUL)
             xmodemPacketForPhone = xModem.getForPhone();
         if (xmodemPacketForPhone.control != meshtastic_XModem_Control_NUL) {

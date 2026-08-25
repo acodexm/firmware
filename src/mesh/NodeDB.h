@@ -279,6 +279,9 @@ class NodeDB
     /// @return true if the save was successful
     bool saveToDisk(int saveWhat = SEGMENT_CONFIG | SEGMENT_MODULECONFIG | SEGMENT_DEVICESTATE | SEGMENT_CHANNELS |
                                    SEGMENT_NODEDATABASE);
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+    bool capturePersistenceSegment(int segment, uint8_t *destination, size_t capacity, size_t &lengthOut);
+#endif
 
     /** Reinit radio config if needed, because either:
      * a) sometimes a buggy android app might send us bogus settings or
@@ -673,7 +676,10 @@ class NodeDB
 
     bool saveChannelsToDisk();
     bool saveDeviceStateToDisk();
+    bool canPersistNodeDatabase() const;
     bool saveNodeDatabaseToDisk();
+    void projectNodeDatabaseForEncoding();
+    void clearNodeDatabaseProjection();
     void sortMeshDB();
 
     // Defined in NodeDBLegacyMigration.cpp. Decodes /prefs/nodes.proto via

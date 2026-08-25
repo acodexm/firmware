@@ -34,7 +34,9 @@
 #if HAS_TRAFFIC_MANAGEMENT
 #include "modules/TrafficManagementModule.h"
 #endif
+#ifndef MESHTASTIC_EXCLUDE_XMODEM
 #include "xmodem.h"
+#endif
 #include <ErriezCRC32.h>
 #include <algorithm>
 #include <pb_decode.h>
@@ -76,6 +78,11 @@
 #endif
 
 NodeDB *nodeDB = nullptr;
+
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+extern bool runaMeshtasticPersistenceReady();
+extern bool runaQueueMeshtasticPersistence(int segments);
+#endif
 
 // we have plenty of ram so statically alloc this tempbuf (for now)
 EXT_RAM_BSS_ATTR meshtastic_DeviceState devicestate;
@@ -2907,6 +2914,7 @@ bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_
 #endif
 
     bool okay = false;
+    bool writeSucceeded = false;
 #ifdef FSCom
     auto f = SafeFile(filename, fullAtomic);
 
@@ -2919,7 +2927,7 @@ bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_
         okay = true;
     }
 
-    bool writeSucceeded = f.close();
+    writeSucceeded = f.close();
 
     if (!okay || !writeSucceeded) {
         LOG_ERROR("Can't write prefs!");
@@ -2927,7 +2935,7 @@ bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_
 #else
     LOG_ERROR("ERROR: Filesystem not implemented");
 #endif
-    return okay;
+    return okay && writeSucceeded;
 }
 
 bool NodeDB::saveChannelsToDisk()
@@ -2969,16 +2977,90 @@ bool NodeDB::saveDeviceStateToDisk()
     return saveProto(deviceStateFileName, meshtastic_DeviceState_size, &meshtastic_DeviceState_msg, &devicestate, true);
 }
 
-bool NodeDB::saveNodeDatabaseToDisk()
+void NodeDB::projectNodeDatabaseForEncoding()
+{
+#if !MESHTASTIC_EXCLUDE_POSITIONDB
+    nodeDatabase.positions.clear();
+    nodeDatabase.positions.reserve(nodePositions.size());
+    for (const auto &kv : nodePositions) {
+        meshtastic_NodePositionEntry entry = meshtastic_NodePositionEntry_init_default;
+        entry.num = kv.first;
+        entry.has_position = true;
+        entry.position = kv.second;
+        nodeDatabase.positions.push_back(entry);
+    }
+#else
+    nodeDatabase.positions.clear();
+#endif
+#if !MESHTASTIC_EXCLUDE_TELEMETRYDB
+    nodeDatabase.telemetry.clear();
+    nodeDatabase.telemetry.reserve(nodeTelemetry.size());
+    for (const auto &kv : nodeTelemetry) {
+        meshtastic_NodeTelemetryEntry entry = meshtastic_NodeTelemetryEntry_init_default;
+        entry.num = kv.first;
+        entry.has_device_metrics = true;
+        entry.device_metrics = kv.second;
+        nodeDatabase.telemetry.push_back(entry);
+    }
+#else
+    nodeDatabase.telemetry.clear();
+#endif
+#if !MESHTASTIC_EXCLUDE_ENVIRONMENTDB
+    nodeDatabase.environment.clear();
+    nodeDatabase.environment.reserve(nodeEnvironment.size());
+    for (const auto &kv : nodeEnvironment) {
+        meshtastic_NodeEnvironmentEntry entry = meshtastic_NodeEnvironmentEntry_init_default;
+        entry.num = kv.first;
+        entry.has_environment_metrics = true;
+        entry.environment_metrics = kv.second;
+        nodeDatabase.environment.push_back(entry);
+    }
+#else
+    nodeDatabase.environment.clear();
+#endif
+#if !MESHTASTIC_EXCLUDE_STATUSDB
+    nodeDatabase.status.clear();
+    nodeDatabase.status.reserve(nodeStatus.size());
+    for (const auto &kv : nodeStatus) {
+        meshtastic_NodeStatusEntry entry = meshtastic_NodeStatusEntry_init_default;
+        entry.num = kv.first;
+        entry.has_status = true;
+        entry.status = kv.second;
+        nodeDatabase.status.push_back(entry);
+    }
+#else
+    nodeDatabase.status.clear();
+#endif
+}
+
+void NodeDB::clearNodeDatabaseProjection()
+{
+    // Retain bounded vector capacity so later runtime snapshots do not allocate
+    // while servicing radio/config mutations. Empty projections carry no
+    // authoritative state; the satellite maps remain the owners.
+    nodeDatabase.positions.clear();
+    nodeDatabase.telemetry.clear();
+    nodeDatabase.environment.clear();
+    nodeDatabase.status.clear();
+}
+
+bool NodeDB::canPersistNodeDatabase() const
 {
     // Don't persist the node DB until this device has a PKI keypair
     // TODO: revisit when https://github.com/meshtastic/firmware/pull/10478 lands
 #if !(MESHTASTIC_EXCLUDE_PKI_KEYGEN || MESHTASTIC_EXCLUDE_PKI)
     if (owner.public_key.size != 32 && !owner.is_licensed) {
         LOG_DEBUG("Skip NodeDB without key");
-        return true;
+        return false;
     }
 #endif
+    return true;
+}
+
+bool NodeDB::saveNodeDatabaseToDisk()
+{
+    if (!canPersistNodeDatabase())
+        return true;
 
     // do not try to save anything if power level is not safe. In many cases flash will be lock-protected
     // and all writes will fail anyway. Device should be sleeping at this point anyway.
@@ -2989,7 +3071,7 @@ bool NodeDB::saveNodeDatabaseToDisk()
 
     // Defer (don't fail) while xmodem holds the prefs file handle. Returning false
     // would propagate through saveToDisk() and trigger fsFormat() mid-transfer.
-#ifdef FSCom
+#if defined(FSCom) && !defined(MESHTASTIC_EXCLUDE_XMODEM)
     if (xModem.isBusy()) {
         LOG_DEBUG("Deferring NodeDB save: xmodem transfer in progress");
         return true;
@@ -3005,74 +3087,13 @@ bool NodeDB::saveNodeDatabaseToDisk()
     // Project the maps into the on-disk vectors just before encoding; cleared
     // again on the way out so we don't carry duplicate state.
     concurrency::LockGuard guard(&satelliteMutex);
-#if !MESHTASTIC_EXCLUDE_POSITIONDB
-    nodeDatabase.positions.clear();
-    nodeDatabase.positions.reserve(nodePositions.size());
-    for (const auto &kv : nodePositions) {
-        meshtastic_NodePositionEntry entry = meshtastic_NodePositionEntry_init_default;
-        entry.num = kv.first;
-        entry.has_position = true;
-        entry.position = kv.second;
-        nodeDatabase.positions.push_back(entry);
-    }
-#else
-    nodeDatabase.positions.clear();
-#endif
-
-#if !MESHTASTIC_EXCLUDE_TELEMETRYDB
-    nodeDatabase.telemetry.clear();
-    nodeDatabase.telemetry.reserve(nodeTelemetry.size());
-    for (const auto &kv : nodeTelemetry) {
-        meshtastic_NodeTelemetryEntry entry = meshtastic_NodeTelemetryEntry_init_default;
-        entry.num = kv.first;
-        entry.has_device_metrics = true;
-        entry.device_metrics = kv.second;
-        nodeDatabase.telemetry.push_back(entry);
-    }
-#else
-    nodeDatabase.telemetry.clear();
-#endif
-
-#if !MESHTASTIC_EXCLUDE_ENVIRONMENTDB
-    nodeDatabase.environment.clear();
-    nodeDatabase.environment.reserve(nodeEnvironment.size());
-    for (const auto &kv : nodeEnvironment) {
-        meshtastic_NodeEnvironmentEntry entry = meshtastic_NodeEnvironmentEntry_init_default;
-        entry.num = kv.first;
-        entry.has_environment_metrics = true;
-        entry.environment_metrics = kv.second;
-        nodeDatabase.environment.push_back(entry);
-    }
-#else
-    nodeDatabase.environment.clear();
-#endif
-
-#if !MESHTASTIC_EXCLUDE_STATUSDB
-    nodeDatabase.status.clear();
-    nodeDatabase.status.reserve(nodeStatus.size());
-    for (const auto &kv : nodeStatus) {
-        meshtastic_NodeStatusEntry entry = meshtastic_NodeStatusEntry_init_default;
-        entry.num = kv.first;
-        entry.has_status = true;
-        entry.status = kv.second;
-        nodeDatabase.status.push_back(entry);
-    }
-#else
-    nodeDatabase.status.clear();
-#endif
+    projectNodeDatabaseForEncoding();
 
     size_t nodeDatabaseSize;
     pb_get_encoded_size(&nodeDatabaseSize, meshtastic_NodeDatabase_fields, &nodeDatabase);
     bool ok = saveProto(nodeDatabaseFileName, nodeDatabaseSize, &meshtastic_NodeDatabase_msg, &nodeDatabase, false);
 
-    nodeDatabase.positions.clear();
-    nodeDatabase.positions.shrink_to_fit();
-    nodeDatabase.telemetry.clear();
-    nodeDatabase.telemetry.shrink_to_fit();
-    nodeDatabase.environment.clear();
-    nodeDatabase.environment.shrink_to_fit();
-    nodeDatabase.status.clear();
-    nodeDatabase.status.shrink_to_fit();
+    clearNodeDatabaseProjection();
 #if WARM_NODE_COUNT > 0
 #ifdef ARCH_RP2040
     // nodes.proto + warm.dat are written back-to-back without the loop running between them;
@@ -3183,6 +3204,86 @@ bool NodeDB::saveToDiskNoRetry(int saveWhat)
     return success;
 }
 
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+bool NodeDB::capturePersistenceSegment(int segment, uint8_t *destination, size_t capacity, size_t &lengthOut)
+{
+    lengthOut = 0;
+    if (destination == nullptr || capacity == 0)
+        return false;
+
+    const pb_msgdesc_t *fields = nullptr;
+    const void *record = nullptr;
+    bool satelliteLocked = false;
+
+    switch (segment) {
+    case SEGMENT_CONFIG:
+        config.has_device = true;
+        config.has_display = true;
+        config.has_lora = true;
+        config.has_position = true;
+        config.has_power = true;
+        config.has_network = true;
+        config.has_bluetooth = true;
+        config.has_security = true;
+        fields = &meshtastic_LocalConfig_msg;
+        record = &config;
+        break;
+    case SEGMENT_MODULECONFIG:
+        moduleConfig.has_canned_message = true;
+        moduleConfig.has_external_notification = true;
+        moduleConfig.has_mqtt = true;
+        moduleConfig.has_range_test = true;
+        moduleConfig.has_serial = true;
+        moduleConfig.has_store_forward = true;
+        moduleConfig.has_telemetry = true;
+        moduleConfig.has_neighbor_info = true;
+        moduleConfig.has_detection_sensor = true;
+        moduleConfig.has_ambient_lighting = true;
+        moduleConfig.has_audio = true;
+        moduleConfig.has_paxcounter = true;
+        moduleConfig.has_statusmessage = true;
+        moduleConfig.has_tak = true;
+#if !MESHTASTIC_EXCLUDE_BEACON
+        moduleConfig.has_mesh_beacon = true;
+#endif
+        fields = &meshtastic_LocalModuleConfig_msg;
+        record = &moduleConfig;
+        break;
+    case SEGMENT_DEVICESTATE:
+        fields = &meshtastic_DeviceState_msg;
+        record = &devicestate;
+        break;
+    case SEGMENT_CHANNELS:
+        fields = &meshtastic_ChannelFile_msg;
+        record = &channelFile;
+        break;
+    case SEGMENT_NODEDATABASE:
+        satelliteMutex.lock();
+        satelliteLocked = true;
+        projectNodeDatabaseForEncoding();
+        fields = &meshtastic_NodeDatabase_msg;
+        record = &nodeDatabase;
+        break;
+    default:
+        return false;
+    }
+
+    pb_ostream_t stream = pb_ostream_from_buffer(destination, capacity);
+    const bool encoded = pb_encode(&stream, fields, record);
+    if (encoded)
+        lengthOut = stream.bytes_written;
+    else
+        LOG_ERROR("NodeDB: async snapshot encode failed: %s", PB_GET_ERROR(&stream));
+
+    if (segment == SEGMENT_NODEDATABASE) {
+        clearNodeDatabaseProjection();
+        if (satelliteLocked)
+            satelliteMutex.unlock();
+    }
+    return encoded;
+}
+#endif
+
 bool NodeDB::saveToDisk(int saveWhat)
 {
     LOG_DEBUG("Save to disk %d", saveWhat);
@@ -3194,9 +3295,22 @@ bool NodeDB::saveToDisk(int saveWhat)
         return false;
     }
 
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+    if (runaMeshtasticPersistenceReady()) {
+        if ((saveWhat & SEGMENT_NODEDATABASE) != 0 && !canPersistNodeDatabase())
+            saveWhat &= ~SEGMENT_NODEDATABASE;
+        if (saveWhat == 0)
+            return true;
+        return runaQueueMeshtasticPersistence(saveWhat);
+    }
+#endif
+
     bool success = saveToDiskNoRetry(saveWhat);
 
     if (!success) {
+#ifdef MESHTASTIC_PRESERVE_FILESYSTEM_ON_SAVE_FAILURE
+        LOG_ERROR("Failed to save to disk; preserving filesystem for recovery");
+#else
         LOG_ERROR("Failed to save to disk, retrying");
         spiLock->lock();
         fsFormat();
@@ -3206,6 +3320,7 @@ bool NodeDB::saveToDisk(int saveWhat)
 
         RECORD_CRITICALERROR(success ? meshtastic_CriticalErrorCode_FLASH_CORRUPTION_RECOVERABLE
                                      : meshtastic_CriticalErrorCode_FLASH_CORRUPTION_UNRECOVERABLE);
+#endif
     }
 
     return success;
