@@ -80,7 +80,6 @@
 NodeDB *nodeDB = nullptr;
 
 #ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
-extern bool runaMeshtasticPersistenceReady();
 extern bool runaQueueMeshtasticPersistence(int segments);
 #endif
 
@@ -3296,13 +3295,11 @@ bool NodeDB::saveToDisk(int saveWhat)
     }
 
 #ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
-    if (runaMeshtasticPersistenceReady()) {
-        if ((saveWhat & SEGMENT_NODEDATABASE) != 0 && !canPersistNodeDatabase())
-            saveWhat &= ~SEGMENT_NODEDATABASE;
-        if (saveWhat == 0)
-            return true;
-        return runaQueueMeshtasticPersistence(saveWhat);
-    }
+    if ((saveWhat & SEGMENT_NODEDATABASE) != 0 && !canPersistNodeDatabase())
+        saveWhat &= ~SEGMENT_NODEDATABASE;
+    if (saveWhat == 0)
+        return true;
+    return runaQueueMeshtasticPersistence(saveWhat);
 #endif
 
     bool success = saveToDiskNoRetry(saveWhat);

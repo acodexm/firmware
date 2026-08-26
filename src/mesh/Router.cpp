@@ -30,9 +30,6 @@
 #include "serialization/MeshPacketSerializer.h"
 #endif
 
-#define MAX_RX_FROMRADIO                                                                                                         \
-    4 // max number of packets destined to our queue, we dispatch packets quickly so it doesn't need to be big
-
 // I think this is right, one packet for each of the three fifos + one packet being currently assembled for TX or RX
 // And every TX packet might have a retransmission packet or an ack alive at any moment
 
@@ -146,7 +143,12 @@ void resetRoutingAuthEvaluationCount()
  *
  * Currently we only allow one interface, that may change in the future
  */
-Router::Router() : concurrency::OSThread("Router"), fromRadioQueue(MAX_RX_FROMRADIO)
+Router::Router()
+    : concurrency::OSThread("Router")
+#ifdef ARCH_PORTDUINO
+      ,
+      fromRadioQueue(MAX_RX_FROMRADIO)
+#endif
 {
     // This is called pre main(), don't touch anything here, the following code is not safe
 
@@ -164,7 +166,6 @@ Router::Router() : concurrency::OSThread("Router"), fromRadioQueue(MAX_RX_FROMRA
     // Runtime default for the auth-cache snapshot policy. Keep it here, saves flash.
     routingAuthCache.policy = meshtastic_Config_SecurityConfig_PacketSignaturePolicy_PACKET_SIGNATURE_POLICY_BALANCED;
 }
-
 bool Router::shouldDecrementHopLimit(const meshtastic_MeshPacket *p)
 {
     // First hop MUST always decrement to prevent retry issues

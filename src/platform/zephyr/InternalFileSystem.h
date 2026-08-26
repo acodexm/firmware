@@ -41,6 +41,7 @@ class InternalFileSystem; // forward
 struct ZephyrFileState {
     bool valid = false;
     bool is_dir = false;
+    size_t file_size = 0;
 
     // Absolute Zephyr path, e.g. "/lfs/prefs/config.proto"
     char fullpath[ZEPHYR_FS_PATHLEN] = {0};
@@ -97,6 +98,11 @@ class File
         if (!_s || !_s->valid || _s->is_dir)
             return 0;
         ssize_t n = fs_write(&_s->file, buf, len);
+        if (n > 0) {
+            const off_t position = fs_tell(&_s->file);
+            if (position > 0 && static_cast<size_t>(position) > _s->file_size)
+                _s->file_size = static_cast<size_t>(position);
+        }
         return n < 0 ? 0 : (size_t)n;
     }
 
@@ -114,10 +120,7 @@ class File
     {
         if (!_s || !_s->valid || _s->is_dir)
             return 0;
-        struct fs_dirent entry;
-        if (fs_stat(_s->fullpath, &entry) == 0)
-            return (size_t)entry.size;
-        return 0;
+        return _s->file_size;
     }
 
     bool isDirectory() { return _s && _s->valid && _s->is_dir; }
@@ -156,10 +159,7 @@ class File
         off_t pos = fs_tell(&_s->file);
         if (pos < 0)
             return 0;
-        struct fs_dirent entry;
-        if (fs_stat(_s->fullpath, &entry) != 0)
-            return 0;
-        long rem = (long)entry.size - (long)pos;
+        const long rem = static_cast<long>(_s->file_size) - static_cast<long>(pos);
         return rem > 0 ? (int)rem : 0;
     }
 

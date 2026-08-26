@@ -12,6 +12,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/spi.h>
+#include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
 
@@ -20,7 +21,23 @@ SPIClass SPI1;
 TwoWire Wire;
 TwoWire Wire1;
 HardwareSerial Serial;
-HardwareSerial Serial1;
+namespace
+{
+const device *consoleUartDevice()
+{
+    return DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+}
+
+const device *gpsUartDevice()
+{
+#if DT_NODE_HAS_STATUS(DT_ALIAS(gps_uart), okay)
+    return DEVICE_DT_GET(DT_ALIAS(gps_uart));
+#else
+    return nullptr;
+#endif
+}
+} // namespace
+HardwareSerial Serial1(gpsUartDevice());
 HardwareSerial Serial2;
 
 extern "C" void __attribute__((weak)) _fini(void) {}
@@ -62,9 +79,122 @@ extern "C" void NVIC_SystemReset(void)
 }
 #pragma pop_macro("NVIC_SystemReset")
 
+HardwareSerial::HardwareSerial() : HardwareSerial(nullptr) {}
+
+HardwareSerial::HardwareSerial(const device *uartDevice) : uartDevice_(uartDevice)
+{
+    ring_buf_init(&receiveRing_, sizeof(receiveStorage_), receiveStorage_);
+}
+
+void HardwareSerial::begin(unsigned long baud)
+{
+    begin(baud, SERIAL_8N1);
+}
+
+void HardwareSerial::begin(unsigned long baud, uint16_t config)
+{
+    begin(baud, static_cast<uint32_t>(config), -1, -1, false);
+}
+
+void HardwareSerial::begin(unsigned long baud, uint32_t, int8_t, int8_t, bool invert)
+{
+    if (uartDevice_ == nullptr || invert || !device_is_ready(uartDevice_))
+        return;
+
+    if (started_)
+        uart_irq_rx_disable(uartDevice_);
+    started_ = false;
+
+    uart_config uartConfig{};
+    uartConfig.baudrate = static_cast<uint32_t>(baud);
+    uartConfig.parity = UART_CFG_PARITY_NONE;
+    uartConfig.stop_bits = UART_CFG_STOP_BITS_1;
+    uartConfig.data_bits = UART_CFG_DATA_BITS_8;
+    uartConfig.flow_ctrl = UART_CFG_FLOW_CTRL_NONE;
+    if (uart_configure(uartDevice_, &uartConfig) != 0 || uart_irq_callback_user_data_set(uartDevice_, handleInterrupt, this) != 0)
+        return;
+
+    ring_buf_reset(&receiveRing_);
+    uart_irq_rx_enable(uartDevice_);
+    baud_ = baud;
+    started_ = true;
+}
+
+void HardwareSerial::end()
+{
+    if (uartDevice_ != nullptr && started_)
+        uart_irq_rx_disable(uartDevice_);
+    started_ = false;
+    baud_ = 0;
+    ring_buf_reset(&receiveRing_);
+}
+
+void HardwareSerial::handleInterrupt(const device *uartDevice, void *context)
+{
+    auto *serial = static_cast<HardwareSerial *>(context);
+    if (serial == nullptr || !uart_irq_update(uartDevice))
+        return;
+
+    uint8_t bytes[32];
+    while (uart_irq_rx_ready(uartDevice)) {
+        const int received = uart_fifo_read(uartDevice, bytes, sizeof(bytes));
+        if (received <= 0)
+            break;
+        (void)ring_buf_put(&serial->receiveRing_, bytes, static_cast<uint32_t>(received));
+    }
+}
+
+int HardwareSerial::available()
+{
+    return static_cast<int>(ring_buf_size_get(&receiveRing_));
+}
+
+int HardwareSerial::read()
+{
+    uint8_t value = 0;
+    return ring_buf_get(&receiveRing_, &value, 1) == 1 ? value : -1;
+}
+
+int HardwareSerial::peek()
+{
+    uint8_t value = 0;
+    return ring_buf_peek(&receiveRing_, &value, 1) == 1 ? value : -1;
+}
+
+size_t HardwareSerial::readBytes(uint8_t *buffer, size_t size)
+{
+    if (buffer == nullptr)
+        return 0;
+
+    const uint32_t startedAt = k_uptime_get_32();
+    size_t readCount = 0;
+    while (readCount < size && k_uptime_get_32() - startedAt < timeoutMs_) {
+        const uint32_t received = ring_buf_get(&receiveRing_, buffer + readCount, static_cast<uint32_t>(size - readCount));
+        readCount += received;
+        if (received == 0)
+            k_sleep(K_MSEC(1));
+    }
+    return readCount;
+}
+
+HardwareSerial::operator bool() const
+{
+    return uartDevice_ == nullptr || (started_ && device_is_ready(uartDevice_));
+}
+
+void HardwareSerial::flush() {}
+
 size_t HardwareSerial::write(uint8_t value)
 {
-    printk("%c", static_cast<char>(value));
+    if (uartDevice_ != nullptr) {
+        if (!started_)
+            return 0;
+        uart_poll_out(uartDevice_, value);
+        return 1;
+    }
+    const device *console = consoleUartDevice();
+    if (device_is_ready(console))
+        (void)uart_fifo_fill(console, &value, 1);
     return 1;
 }
 
@@ -73,22 +203,17 @@ size_t HardwareSerial::write(const uint8_t *buffer, size_t size)
     if (buffer == nullptr)
         return 0;
 
-    size_t offset = 0;
-    while (offset < size) {
-        const size_t chunkSize = MIN(size - offset, static_cast<size_t>(INT_MAX));
-        const auto *chunk = reinterpret_cast<const char *>(buffer + offset);
-        const void *nul = memchr(chunk, '\0', chunkSize);
-        const size_t textSize = nul == nullptr ? chunkSize : static_cast<const char *>(nul) - chunk;
-
-        if (textSize != 0U)
-            printk("%.*s", static_cast<int>(textSize), chunk);
-        if (nul != nullptr) {
-            printk("%c", '\0');
-            offset += textSize + 1U;
-        } else {
-            offset += textSize;
-        }
+    if (uartDevice_ != nullptr) {
+        if (!started_)
+            return 0;
+        for (size_t index = 0; index < size; ++index)
+            uart_poll_out(uartDevice_, buffer[index]);
+        return size;
     }
+
+    const device *console = consoleUartDevice();
+    if (device_is_ready(console))
+        (void)uart_fifo_fill(console, buffer, static_cast<int>(MIN(size, static_cast<size_t>(INT_MAX))));
     return size;
 }
 

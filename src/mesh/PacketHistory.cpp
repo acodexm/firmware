@@ -8,7 +8,7 @@
 #include "platform/portduino/PortduinoGlue.h"
 #endif
 #include "Throttle.h"
-
+#include <new>
 #define RECENT_WARN_AGE (10 * 60 * 1000L) // Warn if the packet that gets removed was more recent than 10 min
 
 #define VERBOSE_PACKET_HISTORY 0     // Set to 1 for verbose logging, 2 for heavy debugging
@@ -31,7 +31,7 @@ PacketHistory::PacketHistory(uint32_t size) : recentPacketsCapacity(0) // Initia
 
     // Allocate memory for the recent packets array
     recentPacketsCapacity = size;
-    recentPackets.reset(new PacketRecord[recentPacketsCapacity]);
+    recentPackets.reset(new (std::nothrow) PacketRecord[recentPacketsCapacity]);
     if (!recentPackets) { // No logging here, console/log probably uninitialized yet.
         LOG_ERROR("Packet History - Memory allocation failed for size=%d entries / %d Bytes", size,
                   sizeof(PacketRecord) * recentPacketsCapacity);
@@ -47,7 +47,7 @@ PacketHistory::PacketHistory(uint32_t size) : recentPacketsCapacity(0) // Initia
     // Allocate hash index with load factor <= 0.5 for short probe chains
     hashCapacity = nextPowerOf2(recentPacketsCapacity * 2);
     hashMask = hashCapacity - 1;
-    hashIndex.reset(new uint16_t[hashCapacity]);
+    hashIndex.reset(new (std::nothrow) uint16_t[hashCapacity]);
     if (!hashIndex) {
         LOG_ERROR("Packet History - Hash index allocation failed for %d entries", hashCapacity);
         hashCapacity = 0;

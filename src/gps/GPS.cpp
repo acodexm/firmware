@@ -1989,7 +1989,7 @@ std::unique_ptr<GPS> GPS::createGps()
         _serial_gps->setTx(new_gps->tx_gpio);
         _serial_gps->setRx(new_gps->rx_gpio);
         _serial_gps->begin(GPS_BAUDRATE);
-#elif defined(ARCH_PORTDUINO)
+#elif defined(ARCH_PORTDUINO) || defined(ARCH_ZEPHYR)
         // Portduino can't set the GPS pins directly.
         _serial_gps->begin(GPS_BAUDRATE);
 #else

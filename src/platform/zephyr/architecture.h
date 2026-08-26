@@ -51,3 +51,6 @@
 
 #include <zephyr/kernel.h>
 #define xPortInIsrContext() k_is_in_isr()
+
+// GPS.cpp uses the Arduino-core name for its selected UART implementation.
+#define SerialUART HardwareSerial

@@ -22,8 +22,10 @@
 #include <strings.h> /* strcasecmp, strncasecmp */
 
 // ── Zephyr kernel ────────────────────────────────────────────────────────────
+#include <zephyr/device.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/sys/ring_buffer.h>
 
 // ── Basic Arduino types ──────────────────────────────────────────────────────
 typedef bool boolean;
@@ -661,26 +663,45 @@ inline String Stream::readStringUntil(char)
 class HardwareSerial : public Stream
 {
   public:
-    void begin(unsigned long) {}
-    void begin(unsigned long, uint16_t) {}
-    void end() {}
+    HardwareSerial();
+    explicit HardwareSerial(const device *uartDevice);
+    HardwareSerial(const HardwareSerial &) = delete;
+    HardwareSerial &operator=(const HardwareSerial &) = delete;
+
+    void begin(unsigned long baud);
+    void begin(unsigned long baud, uint16_t config);
+    void end();
+    unsigned long baudRate() const { return baud_; }
+    void updateBaudRate(unsigned long baud) { begin(baud); }
     void setPins(int rx, int tx) {}
     void setPinout(int tx, int rx) {}
     void setFIFOSize(size_t) {}
     void setRxBufferSize(size_t) {}
-    void begin(unsigned long baud, uint32_t config, int8_t rx = -1, int8_t tx = -1, bool invert = false) {}
-    int available() override { return 0; }
-    int read() override { return -1; }
-    int peek() override { return -1; }
+    void begin(unsigned long baud, uint32_t config, int8_t rx = -1, int8_t tx = -1, bool invert = false);
+    int available() override;
+    int read() override;
+    int peek() override;
     size_t write(uint8_t c) override;
     size_t write(const uint8_t *buf, size_t n) override;
     using Print::write; // un-hide base class write(const char*)
-    size_t readBytes(uint8_t *buf, size_t len) { return 0; }
-    size_t readBytes(char *buf, size_t len) { return 0; }
-    operator bool() const { return true; }
-    void flush() override {}
+    size_t readBytes(uint8_t *buf, size_t len);
+    size_t readBytes(char *buf, size_t len) { return readBytes(reinterpret_cast<uint8_t *>(buf), len); }
+    operator bool() const;
+    void flush() override;
+    void setTimeout(unsigned long timeoutMs) override { timeoutMs_ = timeoutMs; }
     String readString() { return String(); }
     String readStringUntil(char) { return String(); }
+
+  private:
+    static void handleInterrupt(const device *uartDevice, void *context);
+
+    static constexpr size_t kReceiveCapacity = 512;
+    const device *uartDevice_ = nullptr;
+    ring_buf receiveRing_{};
+    uint8_t receiveStorage_[kReceiveCapacity]{};
+    unsigned long timeoutMs_ = 1000;
+    unsigned long baud_ = 0;
+    bool started_ = false;
 };
 
 // Uart - nRF52 BSP alias for HardwareSerial (used by GPS.h when ARCH_NRF52)

@@ -138,7 +138,8 @@ File InternalFileSystem::open(const char *path, const char *mode)
     relativePath(absolute, state->relpath, sizeof(state->relpath));
 
     fs_dirent entry{};
-    if (fs_stat(absolute, &entry) == 0 && entry.type == FS_DIR_ENTRY_DIR) {
+    const int statError = fs_stat(absolute, &entry);
+    if (statError == 0 && entry.type == FS_DIR_ENTRY_DIR) {
         state->is_dir = true;
         if (fs_opendir(&state->dir, absolute) != 0)
             return {};
@@ -154,6 +155,7 @@ File InternalFileSystem::open(const char *path, const char *mode)
     if (error != 0)
         return {};
     state->is_dir = false;
+    state->file_size = strcmp(mode, FILE_O_WRITE) == 0 || statError != 0 ? 0 : static_cast<size_t>(entry.size);
     state->valid = true;
     return File(state);
 }
@@ -274,6 +276,8 @@ File File::openNextFile()
     const int error = state->is_dir ? fs_opendir(&state->dir, absolute) : fs_open(&state->file, absolute, FS_O_READ);
     if (error != 0)
         return {};
+    if (!state->is_dir)
+        state->file_size = static_cast<size_t>(entry.size);
     state->valid = true;
     return File(state);
 }
