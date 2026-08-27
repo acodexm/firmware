@@ -75,7 +75,7 @@ _PROJECT_VARIANTS = (
     env.subst("$PROJECT_DIR").replace("\\", "/").rstrip("/") + "/variants/"
 )
 _project_dir = env.subst("$PROJECT_DIR").replace("\\", "/").rstrip("/")
-_nested_main = _project_dir + "/meshtastic-firmware/src/main.cpp"
+_nested_main = _project_dir + "/firmware-meshtastic/src/main.cpp"
 _MESHTASTIC_MAIN = (
     _nested_main if os.path.isfile(_nested_main) else _project_dir + "/src/main.cpp"
 )
