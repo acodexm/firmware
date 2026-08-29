@@ -323,6 +323,11 @@ void lateInitVariant() {}
 void earlyInitVariant() __attribute__((weak));
 void earlyInitVariant() {}
 
+// Variant hook for product configuration that must be reconciled after filesystem/config loading
+// but before the GPS runtime decides whether to probe the receiver.
+void beforeGpsInitVariant() __attribute__((weak));
+void beforeGpsInitVariant() {}
+
 // NRF52 (and probably other platforms) can report when system is in power failure mode
 // (eg. too low battery voltage) and operating it is unsafe (data corruption, bootloops, etc).
 // For example NRF52 will prevent any flash writes in that case automatically
@@ -1015,6 +1020,7 @@ void setup()
     if (sensor_detected == false) {
 #endif
         if (HAS_GPS) {
+            beforeGpsInitVariant();
             if (config.position.gps_mode != meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT) {
                 gps = GPS::createGps();
                 if (gps) {

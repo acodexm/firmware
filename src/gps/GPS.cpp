@@ -1433,6 +1433,10 @@ int32_t GPS::runOnce()
             LOG_INFO("GPS set to not-present. Skip probe");
             return disable();
         }
+        if (config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_DISABLED) {
+            LOG_INFO("GPS disabled. Defer probe until enabled");
+            return disable();
+        }
         if (!setup())
             return currentDelay; // Setup failed, re-run in two seconds
 
