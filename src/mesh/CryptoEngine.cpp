@@ -118,11 +118,12 @@ bool CryptoEngine::xeddsa_sign(uint32_t fromNode, uint32_t packetId, uint32_t po
     size_t sigLen = buildSigningBuffer(sigBuf, sizeof(sigBuf), fromNode, packetId, portnum, payload, payloadLen);
     if (sigLen == 0)
         return false;
-    // XEdDSA::sign mixes signature[0..31] into the nonce as the spec's random Z (meshtastic/Crypto#3)
-    // for hedged signatures, so seed it - hardware RNG, else the seeded CSPRNG. A weak Z is still
-    // safe against nonce reuse (defense-in-depth only), so we never fail signing over it.
-    if (!HardwareRNG::fill(signature, 32))
-        CryptRNG.rand(signature, 32);
+    // XEdDSA::sign mixes signature[0..31] into the nonce as the spec's random Z (meshtastic/Crypto#3).
+    // Refuse to sign when the platform CSPRNG fails rather than reuse deterministic fallback state.
+    if (!HardwareRNG::fill(signature, 32)) {
+        memset(signature, 0, XEDDSA_SIGNATURE_SIZE);
+        return false;
+    }
     XEdDSA::sign(signature, xeddsa_private_key, xeddsa_public_key, sigBuf, sigLen);
     return true;
 }
@@ -225,11 +226,10 @@ bool CryptoEngine::encryptCurve25519(uint32_t toNode, uint32_t fromNode, meshtas
                                      uint64_t packetNum, size_t numBytes, const uint8_t *bytes, uint8_t *bytesOut)
 {
     uint8_t *auth;
-    // The extra nonce must be unpredictable: use the hardware RNG, falling back to the
-    // seeded CSPRNG only when no hardware source is available.
+    // The extra nonce must be unpredictable. Refuse encryption when the platform CSPRNG fails.
     uint32_t extraNonceTmp;
     if (!HardwareRNG::fill((uint8_t *)&extraNonceTmp, sizeof(extraNonceTmp)))
-        CryptRNG.rand((uint8_t *)&extraNonceTmp, sizeof(extraNonceTmp));
+        return false;
     auth = bytesOut + numBytes;
     memcpy((uint8_t *)(auth + 8), &extraNonceTmp,
            sizeof(uint32_t)); // do not use dereference on potential non aligned pointers : *extraNonce = extraNonceTmp;

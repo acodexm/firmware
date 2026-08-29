@@ -10,7 +10,6 @@
 #include "meshUtils.h"
 #include "modules/AdminModule.h"
 #include "modules/NodeInfoModule.h"
-#include <RNG.h>
 #include <SHA256.h>
 
 #define KEY_VERIFICATION_TIMEOUT_SECS 60
@@ -160,15 +159,18 @@ bool KeyVerificationModule::sendInitialRequest(NodeNum remoteNode)
         IF_SCREEN(graphics::menuHandler::menuQueue = graphics::menuHandler::ThrottleMessage;)
         return false;
     }
-    updateState(true);
-    // The nonce binds the handshake, so draw it from the hardware RNG (falling back to the CSPRNG)
-    // under cryptLock, as allocReply does for the security number. random() is both predictable and
-    // only 32 bits wide, leaving half of this nonce zero.
+    // The nonce binds the handshake, so fail the session if the platform CSPRNG is unavailable.
+    uint64_t nonce = 0;
+    bool nonceGenerated = false;
     {
         concurrency::LockGuard g(cryptLock);
-        if (!HardwareRNG::fill((uint8_t *)&currentNonce, sizeof(currentNonce)))
-            CryptRNG.rand((uint8_t *)&currentNonce, sizeof(currentNonce));
+        nonceGenerated = HardwareRNG::fill((uint8_t *)&nonce, sizeof(nonce));
     }
+    if (!nonceGenerated) {
+        LOG_ERROR("CSPRNG unavailable; key verification was not started");
+        return false;
+    }
+    currentNonce = nonce;
     currentNonceTimestamp = getTime();
     sessionStartedMs = millis();
     currentRemoteNode = remoteNode;
@@ -212,10 +214,6 @@ meshtastic_MeshPacket *KeyVerificationModule::allocReply()
         ignoreRequest = true;
         return nullptr;
     }
-    sessionStartedMs = millis();
-    sessionFromRemote = true;
-    currentState = KEY_VERIFICATION_RECEIVER_AWAITING_HASH1;
-
     auto req = *currentRequest;
     const auto &p = req.decoded;
     meshtastic_KeyVerification scratch;
@@ -223,20 +221,24 @@ meshtastic_MeshPacket *KeyVerificationModule::allocReply()
     meshtastic_MeshPacket *responsePacket = nullptr;
     pb_decode_from_bytes(p.payload.bytes, p.payload.size, &meshtastic_KeyVerification_msg, &scratch);
 
+    // The security number is the handshake's MitM-resistance entropy. Abort if the platform CSPRNG fails.
+    uint32_t securityEntropy = 0;
+    bool securityEntropyGenerated = false;
+    {
+        concurrency::LockGuard g(cryptLock);
+        securityEntropyGenerated = HardwareRNG::fill((uint8_t *)&securityEntropy, sizeof(securityEntropy));
+    }
+    if (!securityEntropyGenerated) {
+        LOG_ERROR("CSPRNG unavailable; key verification request was rejected");
+        return nullptr;
+    }
+    sessionStartedMs = millis();
+    sessionFromRemote = true;
+    currentState = KEY_VERIFICATION_RECEIVER_AWAITING_HASH1;
     currentNonce = scratch.nonce;
     response.nonce = scratch.nonce;
     currentRemoteNode = req.from;
     currentNonceTimestamp = getTime();
-    // The security number is the handshake's MitM-resistance entropy, so draw it from the hardware
-    // RNG (falling back to the CSPRNG used for key material), never the predictable random().
-    // Hold cryptLock like xeddsa_sign does: on nRF52 the fill toggles the CC310 that packet crypto
-    // on the BLE task also uses, and the CryptRNG state is shared with the signing path.
-    uint32_t securityEntropy = 0;
-    {
-        concurrency::LockGuard g(cryptLock);
-        if (!HardwareRNG::fill((uint8_t *)&securityEntropy, sizeof(securityEntropy)))
-            CryptRNG.rand((uint8_t *)&securityEntropy, sizeof(securityEntropy));
-    }
     currentSecurityNumber = (securityEntropy % 999999) + 1;
 
     // Resolve the requester's public key: from the PKI envelope, else carried in hash1 (bootstrap).

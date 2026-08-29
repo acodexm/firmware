@@ -1081,6 +1081,9 @@ meshtastic_Routing_Error perhapsEncode(meshtastic_MeshPacket *p)
                                         p->decoded.xeddsa_signature.bytes)) {
                     p->decoded.xeddsa_signature.size = XEDDSA_SIGNATURE_SIZE;
                     LOG_DEBUG("XEdDSA signed packet 0x%08x", p->id);
+                } else {
+                    LOG_ERROR("CSPRNG unavailable; refusing to send signed packet 0x%08x", p->id);
+                    return meshtastic_Routing_Error_PKI_FAILED;
                 }
             }
 #endif
@@ -1159,7 +1162,10 @@ meshtastic_Routing_Error perhapsEncode(meshtastic_MeshPacket *p)
                          *destKey.bytes);
                 return meshtastic_Routing_Error_PKI_FAILED;
             }
-            crypto->encryptCurve25519(p->to, getFrom(p), destKey, p->id, numbytes, bytes, p->encrypted.bytes);
+            if (!crypto->encryptCurve25519(p->to, getFrom(p), destKey, p->id, numbytes, bytes, p->encrypted.bytes)) {
+                LOG_ERROR("PKI encryption failed for packet 0x%08x", p->id);
+                return meshtastic_Routing_Error_PKI_FAILED;
+            }
             numbytes += MESHTASTIC_PKC_OVERHEAD;
             p->channel = 0;
             p->pki_encrypted = true;
