@@ -1,10 +1,15 @@
 #include "HardwareRNG.h"
+#include "configuration.h"
 
 #include <algorithm>
 #include <cstring>
+#if !defined(ARCH_ZEPHYR)
 #include <random>
+#endif
 
-#include "configuration.h"
+#if defined(ARCH_ZEPHYR)
+#include <zephyr/random/random.h>
+#endif
 
 #if HAS_RADIO
 #include "RadioLibInterface.h"
@@ -38,6 +43,7 @@ namespace HardwareRNG
 
 namespace
 {
+#if !defined(ARCH_ZEPHYR)
 void fillWithRandomDevice(uint8_t *buffer, size_t length)
 {
     std::random_device rd;
@@ -49,6 +55,7 @@ void fillWithRandomDevice(uint8_t *buffer, size_t length)
         offset += toCopy;
     }
 }
+#endif
 
 #if HAS_RADIO
 bool mixWithLoRaEntropy(uint8_t *buffer, size_t length)
@@ -107,7 +114,9 @@ bool fill(uint8_t *buffer, size_t length, bool useRadioEntropy)
 
     bool filled = false;
 
-#if defined(ARCH_NRF52)
+#if defined(ARCH_ZEPHYR)
+    filled = sys_csrand_get(buffer, length) == 0;
+#elif defined(ARCH_NRF52)
     // The Nordic SDK RNG provides cryptographic-quality randomness backed by hardware.
     nRFCrypto.begin();
     auto result = nRFCrypto.Random.generate(buffer, length);
@@ -155,20 +164,20 @@ bool fill(uint8_t *buffer, size_t length, bool useRadioEntropy)
     }
 #endif
 
+#if !defined(ARCH_ZEPHYR)
     if (!filled) {
         // As a last resort, fall back to std::random_device. This should only be reached
         // if a platform-specific source was unavailable.
         fillWithRandomDevice(buffer, length);
         filled = true;
     }
+#endif
 
 #if HAS_RADIO
-    if (useRadioEntropy) {
-        // Best-effort: if the radio is active and can provide modem entropy, XOR it over the
-        // buffer to improve overall quality. We consider the filling a success if either a
-        // good platform RNG or the modem RNG provided data, so we return true as long as at
-        // least one of those steps succeeded.
-        filled = mixWithLoRaEntropy(buffer, length) || filled;
+    if (filled && useRadioEntropy) {
+        // Modem entropy is supplemental. It must never turn a failed platform CSPRNG request
+        // into success because callers use this result to gate identity and nonce generation.
+        (void)mixWithLoRaEntropy(buffer, length);
     }
 #endif
 

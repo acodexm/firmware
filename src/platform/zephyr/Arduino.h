@@ -12,6 +12,7 @@
 #define Arduino_h
 
 // ── C standard headers ───────────────────────────────────────────────────────
+#include <limits.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -24,6 +25,7 @@
 // ── Zephyr kernel ────────────────────────────────────────────────────────────
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/sys/ring_buffer.h>
 
@@ -171,21 +173,18 @@ using std::abs;
 #define sq(x) ((x) * (x))
 
 // ── Random ───────────────────────────────────────────────────────────────────
-static inline void randomSeed(unsigned long seed)
-{
-    srand((unsigned int)seed);
-}
+static inline void randomSeed(unsigned long) {}
 static inline long random(void)
 {
-    return (long)rand();
+    return static_cast<long>(sys_rand32_get() & LONG_MAX);
 }
 static inline long random(long bound)
 {
-    return bound > 0 ? (rand() % bound) : 0;
+    return bound > 0 ? static_cast<long>(sys_rand32_get() % static_cast<uint32_t>(bound)) : 0;
 }
 static inline long random(long lo, long hi)
 {
-    return hi > lo ? lo + rand() % (hi - lo) : lo;
+    return hi > lo ? lo + static_cast<long>(sys_rand32_get() % static_cast<uint32_t>(hi - lo)) : lo;
 }
 
 // ── GPIO - real Zephyr implementation ────────────────────────────────────────

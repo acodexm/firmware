@@ -31,17 +31,18 @@
  * @param pubKey The destination for the public key.
  * @param privKey The destination for the private key.
  */
-void CryptoEngine::generateKeyPair(uint8_t *pubKey, uint8_t *privKey)
+bool CryptoEngine::generateKeyPair(uint8_t *pubKey, uint8_t *privKey)
 {
-    // Mix in any randomness we can, to make key generation stronger.
-    CryptRNG.begin(optstr(APP_VERSION));
-
     uint8_t hardwareEntropy[64] = {0};
-    if (HardwareRNG::fill(hardwareEntropy, sizeof(hardwareEntropy), true)) {
-        CryptRNG.stir(hardwareEntropy, sizeof(hardwareEntropy));
-    } else {
-        LOG_WARN("Hardware entropy unavailable, falling back to software RNG");
+    if (!HardwareRNG::fill(hardwareEntropy, sizeof(hardwareEntropy), true)) {
+        LOG_ERROR("Hardware entropy unavailable; refusing to generate identity keys");
+        memset(pubKey, 0, sizeof(public_key));
+        memset(privKey, 0, sizeof(private_key));
+        return false;
     }
+
+    CryptRNG.begin(optstr(APP_VERSION));
+    CryptRNG.stir(hardwareEntropy, sizeof(hardwareEntropy));
     memset(hardwareEntropy, 0, sizeof(hardwareEntropy));
 
     if (myNodeInfo.device_id.size == 16) {
@@ -57,6 +58,7 @@ void CryptoEngine::generateKeyPair(uint8_t *pubKey, uint8_t *privKey)
 #if !(MESHTASTIC_EXCLUDE_XEDDSA)
     XEdDSA::priv_curve_to_ed_keys(private_key, xeddsa_private_key, xeddsa_public_key);
 #endif
+    return true;
 }
 
 /**
@@ -193,8 +195,7 @@ bool CryptoEngine::ensurePkiKeys(meshtastic_Config_SecurityConfig &security, mes
         }
     } else {
         LOG_INFO("Generate new PKI keys");
-        generateKeyPair(security.public_key.bytes, security.private_key.bytes);
-        keygenSuccess = true;
+        keygenSuccess = generateKeyPair(security.public_key.bytes, security.private_key.bytes);
     }
 
     if (keygenSuccess) {

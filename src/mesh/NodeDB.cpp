@@ -4352,10 +4352,14 @@ bool NodeDB::generateCryptoKeyPair(const uint8_t *privateKey)
     } else {
         // Generate a new key pair
         LOG_INFO("Generate new PKI keys");
+        keygenSuccess = crypto->generateKeyPair(config.security.public_key.bytes, config.security.private_key.bytes);
+        if (!keygenSuccess) {
+            config.security.public_key.size = 0;
+            config.security.private_key.size = 0;
+            return false;
+        }
         config.security.public_key.size = 32;
         config.security.private_key.size = 32;
-        crypto->generateKeyPair(config.security.public_key.bytes, config.security.private_key.bytes);
-        keygenSuccess = true;
     }
 
     // Update sizes and copy to owner if successful
