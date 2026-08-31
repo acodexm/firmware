@@ -1,11 +1,14 @@
 #include "HardwareRNG.h"
-#include "configuration.h"
 
 #include <algorithm>
 #include <cstring>
 #if !defined(ARCH_ZEPHYR)
+// Arduino defines abs() and round() as macros. Load libstdc++'s random
+// implementation before configuration.h pulls Arduino.h into this unit.
 #include <random>
 #endif
+
+#include "configuration.h"
 
 #if defined(ARCH_ZEPHYR)
 #include <zephyr/random/random.h>
