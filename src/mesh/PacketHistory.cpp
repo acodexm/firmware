@@ -406,10 +406,10 @@ void PacketHistory::insert(const PacketRecord &r)
 
 #if PACKET_HISTORY_TRACE_AGING
     if (tu->rxTimeMsec != 0) {
-        LOG_INFO("Packet History - insert: Reusing slot aged %.3fs TRACE %s", OldtrxTimeMsec / 1000.,
+        LOG_INFO("Packet History - insert: Reusing slot aged %lums TRACE %s", (unsigned long)OldtrxTimeMsec,
                  (tu->id == r.id && tu->sender == r.sender) ? "MATCHED PACKET" : "OLDEST SLOT");
     } else {
-        LOG_INFO("Packet History - insert: Using new slot @uptime %.3fs TRACE NEW", millis() / 1000.);
+        LOG_INFO("Packet History - insert: Using new slot @uptime %lums TRACE NEW", (unsigned long)millis());
     }
 #endif
 
