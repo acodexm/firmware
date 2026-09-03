@@ -11,6 +11,11 @@
 
 using namespace Adafruit_LittleFS_Namespace;
 
+extern "C" __attribute__((weak)) bool runaAllowFilesystemGrowth(const char *, size_t, size_t)
+{
+    return true;
+}
+
 namespace
 {
 

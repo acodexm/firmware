@@ -27,6 +27,11 @@ int readDeviceId(uint8_t *destination, size_t size)
 
 extern ZephyrBluetooth *zephyrBluetooth;
 
+extern "C" __attribute__((weak)) bool runaCriticalStorageReady()
+{
+    return true;
+}
+
 void getMacAddr(uint8_t *destination)
 {
     uint8_t deviceId[deviceIdSize]{};
@@ -46,6 +51,10 @@ bool getDeviceId(uint8_t *destination)
 void setBluetoothEnable(bool enable)
 {
     if (enable) {
+        if (!runaCriticalStorageReady()) {
+            printk("[zephyr-runtime] Bluetooth unavailable: critical storage reserve not ready\n");
+            return;
+        }
         if (zephyrBluetooth == nullptr) {
             zephyrBluetooth = new ZephyrBluetooth();
             zephyrBluetooth->startDisabled();

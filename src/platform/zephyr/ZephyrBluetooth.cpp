@@ -382,7 +382,9 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
     bluetoothStatus->updateStatus(&newStatus);
 
 #if defined(CONFIG_BT_SMP)
-    const int securityError = bt_conn_set_security(conn, BT_SECURITY_L3);
+    // Firmware alone initiates security; mobile waits for the resulting bond
+    // before touching authenticated GATT data.
+    const int securityError = bt_conn_set_security(conn, BT_SECURITY_L4);
     if (securityError)
         LOG_WARN("BLE security request failed: %d", securityError);
 #endif
@@ -427,10 +429,10 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 #if defined(CONFIG_BT_SMP)
 static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum bt_security_err err)
 {
-    if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) {
-        // Phone has a stale bond (device was wiped/reflashed).  Unpair the stale
-        // entry so the phone re-pairs cleanly on the next connection attempt.
-        LOG_WARN("BLE stale bond detected (key missing) - unpairing");
+    if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING || err == BT_SECURITY_ERR_KEY_REJECTED || err == BT_SECURITY_ERR_UNSPECIFIED) {
+        // Controllers report a stale or mismatched bond as key missing, key
+        // rejected, or unspecified after an encryption MIC failure.
+        LOG_WARN("BLE stale bond detected (security err=%d) - unpairing", (int)err);
         bt_unpair(BT_ID_DEFAULT, bt_conn_get_dst(conn));
         bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
     } else if (err) {

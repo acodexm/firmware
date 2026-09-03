@@ -31,6 +31,8 @@
 #define ZEPHYR_FS_MOUNT "/lfs"
 #define ZEPHYR_FS_PATHLEN 256
 
+extern "C" bool runaAllowFilesystemGrowth(const char *path, size_t currentBytes, size_t requestedBytes);
+
 namespace Adafruit_LittleFS_Namespace
 {
 
@@ -96,6 +98,12 @@ class File
     size_t write(const uint8_t *buf, size_t len)
     {
         if (!_s || !_s->valid || _s->is_dir)
+            return 0;
+        const off_t position = fs_tell(&_s->file);
+        if (position < 0 || len > SIZE_MAX - static_cast<size_t>(position))
+            return 0;
+        const size_t requestedEnd = static_cast<size_t>(position) + len;
+        if (!runaAllowFilesystemGrowth(_s->relpath, _s->file_size, requestedEnd))
             return 0;
         ssize_t n = fs_write(&_s->file, buf, len);
         if (n > 0) {
