@@ -33,9 +33,14 @@ void LockingArduinoHal::spiEndTransaction()
     spiLock->unlock();
 }
 
-#if ARCH_PORTDUINO
+#if ARCH_PORTDUINO || defined(ARCH_NRF52)
 void LockingArduinoHal::spiTransfer(uint8_t *out, size_t len, uint8_t *in)
 {
+    // RadioLib describes each command as one buffer. Its generic Arduino HAL
+    // transfers that buffer byte-by-byte, which turns every byte into a
+    // separate EasyDMA transaction on Adafruit's nRF52 SPI implementation.
+    // Keep the entire command contiguous while chip select is asserted, as
+    // required by the SX126x command/response framing.
     spi->transfer(out, in, len);
 }
 #endif

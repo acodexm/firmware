@@ -8,12 +8,16 @@
 #if !MESHTASTIC_EXCLUDE_INPUTBROKER
 #include "input/InputBroker.h"
 #endif
+#if !MESHTASTIC_EXCLUDE_RADIO
 #include "MeshRadio.h"
+#endif
 #include "MeshService.h"
 #include "NodeDB.h"
 #include "PowerFSM.h"
 #include "PowerMon.h"
+#if !MESHTASTIC_EXCLUDE_RADIO
 #include "RadioLibInterface.h"
+#endif
 #include "ReliableRouter.h"
 #include "TransmitHistory.h"
 #include "airtime.h"
@@ -73,6 +77,11 @@ NRF52Bluetooth *nrf52Bluetooth = nullptr;
 void nrf54l15Setup();
 void nrf54l15Loop();
 NRF54L15Bluetooth *nrf54l15Bluetooth = nullptr;
+#endif
+
+#ifdef ARCH_ZEPHYR
+#include "ZephyrBluetooth.h"
+ZephyrBluetooth *zephyrBluetooth = nullptr;
 #endif
 
 #ifdef MESHTASTIC_ENABLE_APPROTECT
@@ -313,6 +322,11 @@ void lateInitVariant() {}
 
 void earlyInitVariant() __attribute__((weak));
 void earlyInitVariant() {}
+
+// Variant hook for product configuration that must be reconciled after filesystem/config loading
+// but before the GPS runtime decides whether to probe the receiver.
+void beforeGpsInitVariant() __attribute__((weak));
+void beforeGpsInitVariant() {}
 
 // NRF52 (and probably other platforms) can report when system is in power failure mode
 // (eg. too low battery voltage) and operating it is unsafe (data corruption, bootloops, etc).
@@ -1006,6 +1020,7 @@ void setup()
     if (sensor_detected == false) {
 #endif
         if (HAS_GPS) {
+            beforeGpsInitVariant();
             if (config.position.gps_mode != meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT) {
                 gps = GPS::createGps();
                 if (gps) {
@@ -1129,7 +1144,9 @@ void setup()
     LOG_DEBUG("SPI2 restarted after ST7701 init (SCK=%d, MISO=%d, MOSI=%d)", LORA_SCK, LORA_MISO, LORA_MOSI);
 #endif
 
+#if !MESHTASTIC_EXCLUDE_RADIO
     auto rIf = initLoRa();
+#endif
 
     lateInitVariant(); // Do board specific init (see extra_variants/README.md for documentation)
 
@@ -1175,6 +1192,7 @@ void setup()
     // Start airtime logger thread.
     airTime = new AirTime();
 
+#if !MESHTASTIC_EXCLUDE_RADIO
     if (!rIf)
         RECORD_CRITICALERROR(meshtastic_CriticalErrorCode_NO_RADIO);
     else {
@@ -1187,6 +1205,7 @@ void setup()
 
         router->addInterface(std::move(rIf));
     }
+#endif
 
     // This must be _after_ service.init because we need our preferences loaded from flash to have proper timeout values
     PowerFSM_setup(); // we will transition to ON in a couple of seconds, FIXME, only do this for cold boots, not waking from SDS
@@ -1222,7 +1241,6 @@ void setup()
     }
 #endif
 }
-
 #endif
 uint32_t rebootAtMsec;     // If not zero we will reboot at this time (used to reboot shortly after the update completes)
 uint32_t shutdownAtMsec;   // If not zero we will shutdown at this time (used to shutdown from python or mobile client)
@@ -1415,6 +1433,7 @@ void loop()
 #endif
     power->powerCommandsCheck();
 
+#if !MESHTASTIC_EXCLUDE_RADIO
     if (RadioLibInterface::instance != nullptr) {
         static uint32_t lastRadioMissedIrqPoll;
         if (!Throttle::isWithinTimespanMs(lastRadioMissedIrqPoll, 1000)) {
@@ -1429,6 +1448,7 @@ void loop()
             RadioLibInterface::instance->resetAGC();
         }
     }
+#endif
 
 #ifdef DEBUG_STACK
     static uint32_t lastPrint = 0;
@@ -1443,7 +1463,7 @@ void loop()
     if (inputBroker)
         inputBroker->processInputEventQueue();
 #endif
-#if ARCH_PORTDUINO
+#if ARCH_PORTDUINO && !MESHTASTIC_EXCLUDE_RADIO
     if (portduino_config.lora_spi_dev == "ch341" && ch341Hal != nullptr) {
         ch341Hal->checkError();
     }

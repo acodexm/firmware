@@ -1,0 +1,724 @@
+// ZephyrBluetooth.cpp - Zephyr BLE GATT peripheral for Meshtastic Zephyr
+//
+// GATT profile (identical UUIDs to the nRF52 / NimBLE implementations):
+//   Service:   6ba1b218-15a8-461f-9fa8-5dcae273eafd
+//   fromNum:   ed9da18c-a800-4f66-a670-aa7547e34453  READ | NOTIFY
+//   fromRadio: 2c55e69e-4993-11ed-b878-0242ac120002  READ
+//   toRadio:   f75c76d2-129e-4dad-a1dd-7866124401e7  WRITE
+//   logRadio:  5a3d6e49-06e6-4423-9944-e9de8cdf9547  READ | NOTIFY | INDICATE
+//
+// Threading model:
+//   - BT RX thread: connected_cb / disconnected_cb / GATT read_/write_
+//   callbacks
+//   - Meshtastic OSThread scheduler (cooperative, main thread):
+//   BleDeferredThread
+//     polls pendingToRadio every 100 ms
+//   - PhoneAPI::onNowHasData: sends fromNum notify synchronously from whichever
+//     thread pushed the packet (bt_gatt_notify is thread-safe in Zephyr)
+//   - active_conn protected by ble_mutex where needed
+
+#include "ZephyrBluetooth.h"
+#include "BluetoothCommon.h"
+#include "BluetoothStatus.h"
+#include "PowerFSM.h"
+#include "concurrency/OSThread.h"
+#include "configuration.h"
+#include "main.h"
+#include "mesh/PhoneAPI.h"
+#include "mesh/mesh-pb-constants.h"
+
+#include <atomic>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/gatt.h>
+#include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/uuid.h>
+#include <zephyr/kernel.h>
+#include <zephyr/settings/settings.h>
+
+// ── UUID definitions (little-endian per Bluetooth spec)
+// ─────────────────────── Syntax: replace hyphens with commas, prefix 0x -
+// matches BT_UUID_128_ENCODE doc.
+
+#define MESH_SVC_UUID_VAL BT_UUID_128_ENCODE(0x6ba1b218, 0x15a8, 0x461f, 0x9fa8, 0x5dcae273eafd)
+#define FROMNUM_UUID_VAL BT_UUID_128_ENCODE(0xed9da18c, 0xa800, 0x4f66, 0xa670, 0xaa7547e34453)
+#define FROMRADIO_UUID_VAL BT_UUID_128_ENCODE(0x2c55e69e, 0x4993, 0x11ed, 0xb878, 0x0242ac120002)
+#define TORADIO_UUID_VAL BT_UUID_128_ENCODE(0xf75c76d2, 0x129e, 0x4dad, 0xa1dd, 0x7866124401e7)
+#define LOGRADIO_UUID_VAL BT_UUID_128_ENCODE(0x5a3d6e49, 0x06e6, 0x4423, 0x9944, 0xe9de8cdf9547)
+
+static const struct bt_uuid_128 mesh_svc_uuid = BT_UUID_INIT_128(MESH_SVC_UUID_VAL);
+static const struct bt_uuid_128 fromnum_uuid = BT_UUID_INIT_128(FROMNUM_UUID_VAL);
+static const struct bt_uuid_128 fromradio_uuid = BT_UUID_INIT_128(FROMRADIO_UUID_VAL);
+static const struct bt_uuid_128 toradio_uuid = BT_UUID_INIT_128(TORADIO_UUID_VAL);
+static const struct bt_uuid_128 logradio_uuid = BT_UUID_INIT_128(LOGRADIO_UUID_VAL);
+
+// ── Module state ─────────────────────────────────────────────────────────────
+
+static struct bt_conn *active_conn = nullptr;
+static K_MUTEX_DEFINE(ble_mutex);
+
+// Take a reference to active_conn under ble_mutex. Returns nullptr if there is
+// no active connection. Caller MUST bt_conn_unref() when done.
+//
+// Reading `active_conn` outside this lock races with disconnected_cb which can
+// unref + null it on the BT RX thread - touching the freed pointer (even just
+// to bt_conn_ref it) is a use-after-free.
+static struct bt_conn *acquire_active_conn()
+{
+    struct bt_conn *conn = nullptr;
+    k_mutex_lock(&ble_mutex, K_FOREVER);
+    if (active_conn) {
+        conn = bt_conn_ref(active_conn);
+    }
+    k_mutex_unlock(&ble_mutex);
+    return conn;
+}
+
+static bool bt_initialized = false; // bt_enable() called at most once
+static bool ble_enabled = false;    // set by setup(), cleared by shutdown()
+
+// Forward declarations - BT_GATT_SERVICE_DEFINE(mesh_svc, ...) is below, but
+// read_fromradio() (defined earlier) needs to reference the service to notify
+// on fromNum after each non-empty read.
+#define FROMNUM_ATTR_IDX 2
+#define LOGRADIO_ATTR_IDX 9
+extern const struct bt_gatt_service_static mesh_svc;
+
+static void start_advertising(); // forward declaration (defined in advertising
+                                 // section below)
+
+// Work item for advertising restart after disconnect.
+//
+// disconnected_cb runs on the BT RX thread (the same thread that processes
+// HCI Command Complete events).  Calling bt_le_adv_start() →
+// bt_hci_cmd_send_sync() directly from that thread deadlocks: the thread blocks
+// on k_sem_take waiting for Command Complete, but it is the very thread that
+// would process it. After 10 s the host panics with "Controller unresponsive,
+// opcode 0x2006 timeout".
+//
+// Fix: submit a k_work item.  The system workqueue runs bt_adv_restart_work_fn
+// on its own thread → no deadlock.
+static struct k_work adv_restart_work;
+
+static void adv_restart_work_fn(struct k_work *work)
+{
+    if (ble_enabled) {
+        start_advertising();
+    }
+}
+
+// CCC state: 0=off, BT_GATT_CCC_NOTIFY=notify, BT_GATT_CCC_INDICATE=indicate
+static std::atomic<uint16_t> fromnumCccValue{0};
+static std::atomic<uint16_t> logradioCccValue{0};
+
+// Scratch buffers - only one BLE operation at a time
+static uint8_t fromRadioBytes[meshtastic_FromRadio_size];
+static size_t fromRadioLen = 0;
+static uint8_t toRadioBytes[meshtastic_ToRadio_size];
+static uint8_t lastToRadio[MAX_TO_FROM_RADIO_SIZE];
+static size_t lastToRadioLen = 0;
+static std::atomic<uint32_t> fromNumValue{0};
+
+// Deferred ToRadio processing
+//
+// write_toradio() runs on the BT RX workqueue thread (6 KB stack).  Calling
+// phoneAPI->handleToRadio() directly triggers handleStartConfig →
+// getFiles("/", 10) → nanopb encode, which overflows the stack on the exact
+// "Client wants config" write.  Instead we copy the payload into a pending
+// buffer under a mutex and let BleDeferredThread (running on the Meshtastic
+// OSThread scheduler, 24 KB stack) do the actual call outside the lock.
+//
+constexpr size_t pendingToRadioDepth = 3;
+struct PendingToRadioPacket {
+    uint8_t bytes[MAX_TO_FROM_RADIO_SIZE];
+    size_t length;
+};
+
+K_MUTEX_DEFINE(pendingToRadioMutex);
+static PendingToRadioPacket pendingToRadioQueue[pendingToRadioDepth]{};
+static size_t pendingToRadioHead = 0;
+static size_t pendingToRadioTail = 0;
+static size_t pendingToRadioCount = 0;
+
+// ── BluetoothPhoneAPI
+// ─────────────────────────────────────────────────────────
+
+class BluetoothPhoneAPI : public PhoneAPI
+{
+    virtual void onNowHasData(uint32_t fromRadioNum) override;
+    virtual bool checkIsConnected() override;
+
+  public:
+    BluetoothPhoneAPI() { api_type = TYPE_BLE; }
+};
+
+static BluetoothPhoneAPI *phoneAPI = nullptr;
+
+// ── CCC change callbacks
+// ──────────────────────────────────────────────────────
+
+static void fromnum_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+    fromnumCccValue.store(value);
+    LOG_INFO("BLE fromNum CCC: %u", value);
+}
+
+static void logradio_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+    logradioCccValue.store(value);
+    LOG_INFO("BLE logRadio CCC: %u", value);
+}
+
+// ── GATT attribute callbacks
+// ──────────────────────────────────────────────────
+
+static ssize_t read_fromnum(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset)
+{
+    const uint32_t value = fromNumValue.load();
+    LOG_INFO("GATT read_fromnum: fromNum=%u offset=%u", value, offset);
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &value, sizeof(value));
+}
+
+static ssize_t read_fromradio(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset)
+{
+    if (offset == 0) {
+        // First chunk: pull the next packet from the queue.
+        // Subsequent chunks (offset > 0) are ATT_READ_BLOB continuations of the
+        // same value and must reuse fromRadioBytes untouched.
+        fromRadioLen = phoneAPI ? phoneAPI->getFromRadio(fromRadioBytes) : 0;
+        LOG_DEBUG("GATT read_fromradio len=%u", (unsigned)fromRadioLen);
+    }
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, fromRadioBytes, fromRadioLen);
+}
+
+static ssize_t read_logradio(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset)
+{
+    // logRadio is write-only from the device side (notify/indicate).
+    // Return an empty read so GATT discovery doesn't fail with NOT_PERMITTED.
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, NULL, 0);
+}
+
+static ssize_t write_toradio(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf, uint16_t len,
+                             uint16_t offset, uint8_t flags)
+{
+    // Writes >MTU-3 arrive here with offset=0 and
+    // flags=BT_GATT_WRITE_FLAG_EXECUTE after Zephyr reassembles the ATT Prepare
+    // Write fragments (CONFIG_BT_ATT_PREPARE_COUNT>0).  Single writes arrive with
+    // flags=0.
+    LOG_DEBUG("GATT write_toradio len=%u flags=0x%x", len, flags);
+    if (offset != 0) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+    }
+    // Reject any write that will not fit in the bounded handoff queue.
+    if (len > sizeof(toRadioBytes) || len > MAX_TO_FROM_RADIO_SIZE) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    }
+
+    if (lastToRadioLen == len && memcmp(lastToRadio, buf, len) == 0)
+        return (ssize_t)len;
+
+    // Running handleToRadio() on the Bluetooth RX workqueue can overflow its
+    // stack during configuration. Queue bounded copies for BleDeferredThread.
+    k_mutex_lock(&pendingToRadioMutex, K_FOREVER);
+    if (pendingToRadioCount == pendingToRadioDepth) {
+        k_mutex_unlock(&pendingToRadioMutex);
+        return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
+    }
+    PendingToRadioPacket &pending = pendingToRadioQueue[pendingToRadioTail];
+    memcpy(pending.bytes, buf, len);
+    pending.length = len;
+    pendingToRadioTail = (pendingToRadioTail + 1U) % pendingToRadioDepth;
+    ++pendingToRadioCount;
+    memcpy(lastToRadio, buf, len);
+    lastToRadioLen = len;
+    k_mutex_unlock(&pendingToRadioMutex);
+    return (ssize_t)len;
+}
+
+// ── GATT service definition (static, linked at compile time)
+// ──────────────────
+//
+// Attribute indices (0-based):
+//   [0]  Primary Service declaration
+//   [1]  fromNum characteristic declaration
+//   [2]  fromNum value            ← notify target (FROMNUM_ATTR_IDX)
+//   [3]  fromNum CCC descriptor
+//   [4]  fromRadio characteristic declaration
+//   [5]  fromRadio value
+//   [6]  toRadio characteristic declaration
+//   [7]  toRadio value
+//   [8]  logRadio characteristic declaration
+//   [9]  logRadio value           ← notify target (LOGRADIO_ATTR_IDX)
+//   [10] logRadio CCC descriptor
+
+// All user characteristics require authenticated encryption (MITM passkey)
+// before the client can read/write. This mirrors the nrf52
+// SECMODE_ENC_WITH_MITM service permission. The stack returns "Insufficient
+// Authentication" on the first access attempt, prompting the client to pair
+// with the configured PIN.
+#define MESH_PERM_READ (BT_GATT_PERM_READ | BT_GATT_PERM_READ_AUTHEN)
+#define MESH_PERM_WRITE (BT_GATT_PERM_WRITE | BT_GATT_PERM_WRITE_AUTHEN)
+
+BT_GATT_SERVICE_DEFINE(
+    mesh_svc, BT_GATT_PRIMARY_SERVICE(&mesh_svc_uuid.uuid),
+
+    // fromNum: READ | NOTIFY - packet-counter triggers phone to read fromRadio
+    BT_GATT_CHARACTERISTIC(&fromnum_uuid.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY, MESH_PERM_READ, read_fromnum, NULL, NULL),
+    BT_GATT_CCC(fromnum_ccc_changed, MESH_PERM_READ | MESH_PERM_WRITE),
+
+    // fromRadio: READ - phone polls this after receiving a fromNum notification
+    BT_GATT_CHARACTERISTIC(&fromradio_uuid.uuid, BT_GATT_CHRC_READ, MESH_PERM_READ, read_fromradio, NULL, NULL),
+
+    // toRadio: WRITE - phone sends protobuf packets to the device
+    BT_GATT_CHARACTERISTIC(&toradio_uuid.uuid, BT_GATT_CHRC_WRITE, MESH_PERM_WRITE, NULL, write_toradio, NULL),
+
+    // logRadio: READ | NOTIFY | INDICATE - log stream to phone when connected
+    BT_GATT_CHARACTERISTIC(&logradio_uuid.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_INDICATE, MESH_PERM_READ,
+                           read_logradio, NULL, NULL),
+    BT_GATT_CCC(logradio_ccc_changed, MESH_PERM_READ | MESH_PERM_WRITE), );
+
+// ── Advertising
+// ───────────────────────────────────────────────────────────────
+//
+// Use legacy advertising (bt_le_adv_start / HCI 0x2006 path).
+//
+// History: we previously used bt_le_ext_adv_create (true extended advertising)
+// because bt_le_adv_start() with CONFIG_BT_EXT_ADV=y was translated internally
+// to the extended HCI path with LEGACY-bit (0x2036), which produced
+// non-connectable PDUs on the Zephyr SW-LL.  The true extended path
+// (0x203x, AUX_ADV_IND) was connectable but caused two problems:
+//   1. iOS CoreBluetooth does not reliably complete GATT after connecting via
+//      extended advertising (zero ATT PDUs observed in all test sessions).
+//   2. After each connection the controller auto-stops the advertising set, and
+//      the subsequent bt_le_ext_adv_delete() sends LE Remove Advertising Set
+//      (0x203c) which times out → kernel oops at hci_core.c:506.
+//
+// With CONFIG_BT_EXT_ADV=n the host uses pure legacy HCI commands - the same
+// path Nordic NCS uses in all Zephyr examples (peripheral_uart,
+// peripheral_lbs) and which is universally iOS-compatible.  The legacy data
+// payload is 31 bytes:
+//   FLAGS (3B) + UUID128 (18B) = 21B in adv; NAME in scan-response (17B).
+
+static void start_advertising()
+{
+    // IMPORTANT: BT_DATA_BYTES() uses C99 compound literals that GCC C++ treats
+    // as temporaries; with -Os the compiler may elide writes, leaving stack
+    // uninitialized.  Use static const arrays for stable data (flags, UUID)
+    // and a runtime pointer for the dynamic device name.
+    static const uint8_t adv_flags_val[] = {BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR};
+    static const uint8_t adv_uuid128_val[] = {MESH_SVC_UUID_VAL};
+
+    const char *name = bt_get_name();
+    size_t full_name_len = strlen(name);
+
+    // Legacy scan-response payload is 31 bytes total. Each AD entry costs 2
+    // bytes (length + type), leaving 29 bytes for the name. With
+    // CONFIG_BT_DEVICE_NAME_MAX=32 the name can exceed that - truncate and
+    // mark as SHORTENED so bt_le_adv_start() doesn't reject the payload.
+    constexpr size_t LEGACY_SCAN_RSP_NAME_MAX = 31 - 2;
+    bool name_shortened = full_name_len > LEGACY_SCAN_RSP_NAME_MAX;
+    uint8_t name_len = (uint8_t)(name_shortened ? LEGACY_SCAN_RSP_NAME_MAX : full_name_len);
+
+    // Primary advertising data: FLAGS + Meshtastic service UUID128 (21 bytes
+    // total)
+    struct bt_data ad[] = {
+        {BT_DATA_FLAGS, sizeof(adv_flags_val), adv_flags_val},
+        {BT_DATA_UUID128_ALL, sizeof(adv_uuid128_val), adv_uuid128_val},
+    };
+    // Scan response: device name (discovered after scan request)
+    struct bt_data sd[] = {
+        {(uint8_t)(name_shortened ? BT_DATA_NAME_SHORTENED : BT_DATA_NAME_COMPLETE), name_len, (const uint8_t *)name},
+    };
+
+    // BT_LE_ADV_OPT_CONN         = connectable legacy ADV_IND + stops after first
+    //                              connection (replaces deprecated
+    //                              CONNECTABLE|ONE_TIME in Zephyr 4.2.1;
+    //                              BT_LE_ADV_OPT_CONN = BIT(0)|BIT(1))
+    // BT_LE_ADV_OPT_USE_IDENTITY = use static random identity address (stable
+    // across reboots) Advertising restart after disconnect is via
+    // adv_restart_work (system workqueue) so calling bt_le_adv_start() from the
+    // BT RX thread context is avoided.
+    int err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY, BT_GAP_ADV_FAST_INT_MIN_2,
+                                              BT_GAP_ADV_FAST_INT_MAX_2, NULL),
+                              ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+
+    if (err == -EALREADY) {
+        return;
+    }
+    if (err) {
+        LOG_WARN("BLE adv start failed: %d", err);
+    } else {
+        LOG_INFO("BLE advertising as '%s'", bt_get_name());
+    }
+}
+
+static void stop_advertising()
+{
+    bt_le_adv_stop();
+}
+
+// ── Connection callbacks
+// ──────────────────────────────────────────────────────
+
+static void connected_cb(struct bt_conn *conn, uint8_t err)
+{
+    if (err) {
+        LOG_WARN("BLE connection failed, err=0x%02x", err);
+        return;
+    }
+
+    k_mutex_lock(&ble_mutex, K_FOREVER);
+    active_conn = bt_conn_ref(conn);
+    k_mutex_unlock(&ble_mutex);
+
+    memset(lastToRadio, 0, sizeof(lastToRadio));
+    lastToRadioLen = 0;
+
+    char addr[BT_ADDR_LE_STR_LEN];
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+    LOG_INFO("BLE connected: %s", addr);
+
+    meshtastic::BluetoothStatus newStatus(meshtastic::BluetoothStatus::ConnectionState::CONNECTED);
+    bluetoothStatus->updateStatus(&newStatus);
+
+#if defined(CONFIG_BT_SMP)
+    // Firmware alone initiates security; mobile waits for the resulting bond
+    // before touching authenticated GATT data.
+    const int securityError = bt_conn_set_security(conn, BT_SECURITY_L4);
+    if (securityError)
+        LOG_WARN("BLE security request failed: %d", securityError);
+#endif
+}
+
+static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
+{
+    LOG_INFO("BLE disconnected, reason=0x%02x", reason);
+
+    k_mutex_lock(&ble_mutex, K_FOREVER);
+    if (active_conn) {
+        bt_conn_unref(active_conn);
+        active_conn = nullptr;
+    }
+    k_mutex_unlock(&ble_mutex);
+
+    fromnumCccValue.store(0);
+    logradioCccValue.store(0);
+
+    if (phoneAPI) {
+        phoneAPI->close();
+    }
+    memset(lastToRadio, 0, sizeof(lastToRadio));
+    lastToRadioLen = 0;
+    k_mutex_lock(&pendingToRadioMutex, K_FOREVER);
+    pendingToRadioHead = 0;
+    pendingToRadioTail = 0;
+    pendingToRadioCount = 0;
+    k_mutex_unlock(&pendingToRadioMutex);
+
+    meshtastic::BluetoothStatus newStatus(meshtastic::BluetoothStatus::ConnectionState::DISCONNECTED);
+    bluetoothStatus->updateStatus(&newStatus);
+
+    // Schedule advertising restart via work queue - NOT from this callback
+    // directly. disconnected_cb runs on the BT RX thread; calling
+    // bt_le_adv_start() here would deadlock (see adv_restart_work comment above).
+    if (ble_enabled) {
+        k_work_submit(&adv_restart_work);
+    }
+}
+
+#if defined(CONFIG_BT_SMP)
+static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum bt_security_err err)
+{
+    if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING || err == BT_SECURITY_ERR_KEY_REJECTED || err == BT_SECURITY_ERR_UNSPECIFIED) {
+        // Controllers report a stale or mismatched bond as key missing, key
+        // rejected, or unspecified after an encryption MIC failure.
+        LOG_WARN("BLE stale bond detected (security err=%d) - unpairing", (int)err);
+        bt_unpair(BT_ID_DEFAULT, bt_conn_get_dst(conn));
+        bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+    } else if (err) {
+        LOG_WARN("BLE security change failed: level=%d err=%d", (int)level, (int)err);
+    } else {
+        LOG_INFO("BLE security level %d established", (int)level);
+    }
+}
+#endif /* CONFIG_BT_SMP */
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+    .connected = connected_cb,
+    .disconnected = disconnected_cb,
+#if defined(CONFIG_BT_SMP)
+    .security_changed = security_changed_cb,
+#endif
+};
+
+// ── Pairing / auth callbacks
+// ──────────────────────────────────────────────────
+
+#if defined(CONFIG_BT_SMP)
+static uint32_t configuredPasskey;
+
+static void auth_passkey_display(struct bt_conn *conn, unsigned int passkey)
+{
+    char passkey_str[7];
+    snprintf(passkey_str, sizeof(passkey_str), "%06u", passkey);
+    configuredPasskey = passkey;
+    LOG_INFO("BLE pairing PIN: %s", passkey_str);
+    powerFSM.trigger(EVENT_BLUETOOTH_PAIR);
+
+    std::string textkey(passkey_str);
+    meshtastic::BluetoothStatus pairingStatus(textkey);
+    bluetoothStatus->updateStatus(&pairingStatus);
+}
+
+static void auth_cancel(struct bt_conn *conn)
+{
+    LOG_WARN("BLE pairing cancelled");
+}
+
+static struct bt_conn_auth_cb auth_cb = {
+    .passkey_display = auth_passkey_display,
+    .passkey_entry = NULL,
+    .cancel = auth_cancel,
+};
+
+static void pairing_complete_cb(struct bt_conn *conn, bool bonded)
+{
+    LOG_INFO("BLE pairing complete, bonded=%d", (int)bonded);
+    meshtastic::BluetoothStatus newStatus(meshtastic::BluetoothStatus::ConnectionState::CONNECTED);
+    bluetoothStatus->updateStatus(&newStatus);
+}
+
+static void pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason)
+{
+    LOG_WARN("BLE pairing failed, reason=%d", (int)reason);
+    meshtastic::BluetoothStatus newStatus(meshtastic::BluetoothStatus::ConnectionState::DISCONNECTED);
+    bluetoothStatus->updateStatus(&newStatus);
+}
+
+static struct bt_conn_auth_info_cb auth_info_cb = {
+    .pairing_complete = pairing_complete_cb,
+    .pairing_failed = pairing_failed_cb,
+};
+#endif /* CONFIG_BT_SMP */
+
+// ── BluetoothPhoneAPI methods
+// ─────────────────────────────────────────────────
+
+void BluetoothPhoneAPI::onNowHasData(uint32_t fromRadioNum)
+{
+    PhoneAPI::onNowHasData(fromRadioNum);
+    fromNumValue.store(fromRadioNum);
+
+    if (!(fromnumCccValue.load() & BT_GATT_CCC_NOTIFY))
+        return;
+
+    // active_conn may be torn down on another thread while we're dispatching
+    // this notify - acquire under ble_mutex so disconnected_cb can't free the
+    // conn between the null check and bt_conn_ref.
+    struct bt_conn *conn = acquire_active_conn();
+    if (!conn)
+        return;
+    bt_gatt_notify(conn, &mesh_svc.attrs[FROMNUM_ATTR_IDX], &fromRadioNum, sizeof(fromRadioNum));
+    bt_conn_unref(conn);
+}
+
+bool BluetoothPhoneAPI::checkIsConnected()
+{
+    struct bt_conn *conn = acquire_active_conn();
+    if (conn == nullptr)
+        return false;
+    bt_conn_unref(conn);
+    return true;
+}
+
+// ── Deferred ToRadio processor ───────────────────────────────────────────────
+//
+// write_toradio() runs on the BT RX workqueue thread (CONFIG_BT_RX_STACK_SIZE)
+// and cannot execute phoneAPI->handleToRadio() directly: handleStartConfig
+// recurses through nanopb encode + state machine init and overflows the RX
+// stack.  This thread runs on the Meshtastic OSThread scheduler (24 KB stack),
+// picks up the pending ToRadio buffer flagged by write_toradio(), and calls
+// handleToRadio() with plenty of headroom.
+//
+// Real-time fromNum notifications are sent synchronously from
+// BluetoothPhoneAPI::onNowHasData() (called by PhoneAPI when new data is
+// queued).
+//
+class BleDeferredThread : public concurrency::OSThread
+{
+  public:
+    BleDeferredThread() : concurrency::OSThread("BleDeferred") {}
+
+  protected:
+    int32_t runOnce() override
+    {
+        // Snapshot the pending ToRadio buffer under the mutex, then release
+        // the lock before calling into handleToRadio (which can be slow and
+        // must not block the BT RX thread producer).
+        uint8_t buffer[MAX_TO_FROM_RADIO_SIZE];
+        size_t length = 0;
+        bool hasPending = false;
+        k_mutex_lock(&pendingToRadioMutex, K_FOREVER);
+        if (pendingToRadioCount != 0) {
+            PendingToRadioPacket &pending = pendingToRadioQueue[pendingToRadioHead];
+            memcpy(buffer, pending.bytes, pending.length);
+            length = pending.length;
+            pendingToRadioHead = (pendingToRadioHead + 1U) % pendingToRadioDepth;
+            --pendingToRadioCount;
+            hasPending = true;
+        }
+        k_mutex_unlock(&pendingToRadioMutex);
+        if (hasPending && phoneAPI)
+            phoneAPI->handleToRadio(buffer, length);
+
+        return 100;
+    }
+};
+
+static BleDeferredThread *bleDeferredThread = nullptr;
+
+// ── ZephyrBluetooth public methods ─────────────────────────────────────────
+
+// Shared init: idempotent setup of work item, OSThread, auth callbacks,
+// bt_enable, and device name. Leaves advertising control to the caller.
+static bool zephyr_bt_init_common()
+{
+    k_work_init(&adv_restart_work, adv_restart_work_fn);
+
+    if (!bleDeferredThread) {
+        bleDeferredThread = new BleDeferredThread();
+    }
+
+    if (!phoneAPI) {
+        phoneAPI = new BluetoothPhoneAPI();
+    }
+
+#if defined(CONFIG_BT_SMP)
+    // NO_PIN is unsupported on this platform: the mesh GATT permissions are
+    // declared with BT_GATT_PERM_*_AUTHEN, prj.conf sets
+    // CONFIG_BT_SMP_ENFORCE_MITM=y, and the build pulls in the SMP/passkey path.
+    // If a user requested NO_PIN we'd register no auth callbacks → no display
+    // path for the passkey → every GATT access returns BT_ATT_ERR_AUTHENTICATION
+    // and the link is unusable. Fall back to RANDOM_PIN behavior with a warning
+    // instead of leaving BLE silently broken.
+    if (config.bluetooth.mode == meshtastic_Config_BluetoothConfig_PairingMode_NO_PIN) {
+        LOG_WARN("BLE: NO_PIN not supported by the MITM-only Zephyr build; "
+                 "treating as RANDOM_PIN");
+    }
+
+    bt_conn_auth_cb_register(&auth_cb);
+    bt_conn_auth_info_cb_register(&auth_info_cb);
+
+    // FIXED_PIN - register the configured passkey so the mobile app prompts
+    // the user for that specific number instead of a random display-only PIN.
+    // RANDOM_PIN (and clamped NO_PIN) keeps the default behavior: Zephyr
+    // generates a fresh passkey on each pairing attempt and fires
+    // auth_passkey_display with it.
+    if (config.bluetooth.mode == meshtastic_Config_BluetoothConfig_PairingMode_FIXED_PIN) {
+        configuredPasskey = config.bluetooth.fixed_pin;
+        int rc = bt_passkey_set(configuredPasskey);
+        if (rc) {
+            LOG_WARN("bt_passkey_set(%u) failed: %d", configuredPasskey, rc);
+        } else {
+            LOG_INFO("BLE fixed PIN: %06u", configuredPasskey);
+        }
+    } else {
+        bt_passkey_set(BT_PASSKEY_INVALID); // random per-pair
+    }
+#endif /* CONFIG_BT_SMP */
+
+    if (!bt_initialized) {
+        int err = bt_enable(NULL);
+        if (err) {
+            LOG_ERROR("BLE enable failed: %d", err);
+            return false;
+        }
+        bt_initialized = true;
+        LOG_INFO("BLE stack enabled");
+        err = settings_load();
+        if (err)
+            LOG_WARN("BLE settings load failed: %d", err);
+    }
+
+    bt_set_name(getDeviceName());
+    return true;
+}
+
+void ZephyrBluetooth::setup()
+{
+    LOG_INFO("ZephyrBluetooth::setup()");
+    if (!zephyr_bt_init_common()) {
+        return;
+    }
+    ble_enabled = true;
+    start_advertising();
+}
+
+void ZephyrBluetooth::shutdown()
+{
+    LOG_INFO("ZephyrBluetooth::shutdown()");
+    ble_enabled = false;
+    stop_advertising();
+
+    struct bt_conn *conn = acquire_active_conn();
+    if (conn) {
+        bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        bt_conn_unref(conn);
+    }
+}
+
+void ZephyrBluetooth::startDisabled()
+{
+    // Initialize BT stack but leave advertising off until resumeAdvertising().
+    if (!zephyr_bt_init_common()) {
+        return;
+    }
+    ble_enabled = false;
+    LOG_INFO("BLE initialized, advertising stopped (startDisabled)");
+}
+
+void ZephyrBluetooth::resumeAdvertising()
+{
+    ble_enabled = true;
+    start_advertising();
+}
+
+void ZephyrBluetooth::clearBonds()
+{
+    LOG_INFO("BLE clear bonds");
+    bt_unpair(BT_ID_DEFAULT, BT_ADDR_LE_ANY);
+}
+
+bool ZephyrBluetooth::isConnected()
+{
+    struct bt_conn *conn = acquire_active_conn();
+    if (conn == nullptr)
+        return false;
+    bt_conn_unref(conn);
+    return true;
+}
+
+int ZephyrBluetooth::getRssi()
+{
+    return 0; // TODO: Zephyr has no direct bt_conn_get_rssi; use HCI RSSI read
+              // command
+}
+
+void ZephyrBluetooth::sendLog(const uint8_t *logMessage, size_t length)
+{
+    if (length > 512 || logradioCccValue.load() == 0) {
+        return;
+    }
+    // Acquire a reference under ble_mutex so disconnected_cb can't free the
+    // connection between the null check and bt_gatt_notify.
+    struct bt_conn *conn = acquire_active_conn();
+    if (!conn) {
+        return;
+    }
+    // Send as notify regardless of whether client subscribed to NOTIFY or
+    // INDICATE - bt_gatt_indicate() requires a params struct with a callback;
+    // notify is simpler and the app accepts both. Change to indicate if
+    // compatibility issues arise.
+    bt_gatt_notify(conn, &mesh_svc.attrs[LOGRADIO_ATTR_IDX], logMessage, (uint16_t)length);
+    bt_conn_unref(conn);
+}

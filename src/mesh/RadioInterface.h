@@ -15,7 +15,9 @@
 // Forward decl to avoid a direct include of generated config headers / full LoRaConfig definition in this widely-included file.
 typedef struct _meshtastic_Config_LoRaConfig meshtastic_Config_LoRaConfig;
 
+#ifndef MAX_TX_QUEUE
 #define MAX_TX_QUEUE 16 // max number of packets which can be waiting for transmission
+#endif
 
 #define MAX_LORA_PAYLOAD_LEN 255 // max length of 255 per Semtech's datasheets on SX12xx
 #define MESHTASTIC_HEADER_LENGTH 16

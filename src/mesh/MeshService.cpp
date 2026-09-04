@@ -49,28 +49,41 @@ the new node can build its node db)
 
 MeshService *service;
 
+#ifndef MAX_MQTT_PROXY_MESSAGES
 #define MAX_MQTT_PROXY_MESSAGES 16
+#endif
+#if !MESHTASTIC_EXCLUDE_MQTT
 static MemoryPool<meshtastic_MqttClientProxyMessage, MAX_MQTT_PROXY_MESSAGES> staticMqttClientProxyMessagePool;
+#endif
 
+#ifndef MAX_QUEUE_STATUS
 #define MAX_QUEUE_STATUS 4
+#endif
 static MemoryPool<meshtastic_QueueStatus, MAX_QUEUE_STATUS> staticQueueStatusPool;
 
+#ifndef MAX_CLIENT_NOTIFICATIONS
 #define MAX_CLIENT_NOTIFICATIONS 4
+#endif
 static MemoryPool<meshtastic_ClientNotification, MAX_CLIENT_NOTIFICATIONS> staticClientNotificationPool;
-
-Allocator<meshtastic_MqttClientProxyMessage> &mqttClientProxyMessagePool = staticMqttClientProxyMessagePool;
 
 Allocator<meshtastic_ClientNotification> &clientNotificationPool = staticClientNotificationPool;
 
 Allocator<meshtastic_QueueStatus> &queueStatusPool = staticQueueStatusPool;
 
 #include "PositionPrecision.h"
+#if !MESHTASTIC_EXCLUDE_MQTT
+Allocator<meshtastic_MqttClientProxyMessage> &mqttClientProxyMessagePool = staticMqttClientProxyMessagePool;
+#endif
+
 #include "Router.h"
 
 MeshService::MeshService()
 #ifdef ARCH_PORTDUINO
     : toPhoneQueue(MAX_RX_TOPHONE), toPhoneQueueStatusQueue(MAX_RX_QUEUESTATUS_TOPHONE),
-      toPhoneMqttProxyQueue(MAX_RX_MQTTPROXY_TOPHONE), toPhoneClientNotificationQueue(MAX_RX_NOTIFICATION_TOPHONE)
+#if !MESHTASTIC_EXCLUDE_MQTT
+      toPhoneMqttProxyQueue(MAX_RX_MQTTPROXY_TOPHONE),
+#endif
+      toPhoneClientNotificationQueue(MAX_RX_NOTIFICATION_TOPHONE)
 #endif
 {
     lastQueueStatus = {0, 0, 16, 0};
@@ -113,8 +126,12 @@ int MeshService::handleFromRadio(const meshtastic_MeshPacket *mp)
     }
 
     printPacket("Forwarding to phone", mp);
-    if (auto *toPhone = packetPool.allocCopy(*mp))
-        sendToPhone(toPhone);
+    auto *copy = packetPool.allocCopy(*mp);
+    if (!copy) {
+        LOG_WARN("Drop packet for phone: packet pool exhausted");
+        return 0;
+    }
+    sendToPhone(copy);
 
     return 0;
 }
@@ -279,8 +296,12 @@ void MeshService::handleToRadio(meshtastic_MeshPacket &p)
     DEBUG_HEAP_BEFORE;
     auto a = packetPool.allocCopy(p);
     DEBUG_HEAP_AFTER("MeshService::handleToRadio", a);
-    if (a)
-        sendToMesh(a, RX_SRC_USER);
+    if (!a) {
+        LOG_WARN("Drop packet from phone: packet pool exhausted");
+        return;
+    }
+    sendToMesh(a, RX_SRC_USER);
+    toRadioPacketAccepted.notifyObservers(&p);
 
     bool loopback = false; // if true send any packet the phone sends back itself (for testing)
     if (loopback) {
@@ -300,8 +321,10 @@ bool MeshService::cancelSending(PacketId id)
 ErrorCode MeshService::sendQueueStatusToPhone(const meshtastic_QueueStatus &qs, ErrorCode res, uint32_t mesh_packet_id)
 {
     meshtastic_QueueStatus *copied = queueStatusPool.allocCopy(qs);
-    if (!copied)
+    if (!copied) {
+        LOG_WARN("Drop queue status: queue-status pool exhausted");
         return ERRNO_UNKNOWN;
+    }
 
     copied->res = res;
     copied->mesh_packet_id = mesh_packet_id;
@@ -323,6 +346,11 @@ ErrorCode MeshService::sendQueueStatusToPhone(const meshtastic_QueueStatus &qs, 
 
 void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPhone)
 {
+    if (!p) {
+        LOG_WARN("Drop mesh packet: packet pool exhausted");
+        return;
+    }
+
     uint32_t mesh_packet_id = p->id;
     nodeDB->updateFrom(*p); // update our local DB for this packet (because phone might have sent position packets etc...)
 
@@ -348,9 +376,10 @@ void MeshService::sendToMesh(meshtastic_MeshPacket *p, RxSource src, bool ccToPh
         DEBUG_HEAP_BEFORE;
         auto a = packetPool.allocCopy(*p);
         DEBUG_HEAP_AFTER("MeshService::sendToMesh", a);
-
         if (a)
             sendToPhone(a);
+        else
+            LOG_WARN("Drop mesh packet copy for phone: packet pool exhausted");
     }
 
     // Router may ask us to release the packet if it wasn't sent
@@ -431,6 +460,11 @@ bool MeshService::phonePayloadIsDecodable(const meshtastic_Data &d)
 
 void MeshService::sendToPhone(meshtastic_MeshPacket *p)
 {
+    if (!p) {
+        LOG_WARN("Drop phone packet: packet pool exhausted");
+        return;
+    }
+
     perhapsDecode(p);
 
     // Withhold decoded nested payloads a strict phone decoder would reject; still-encrypted packets
@@ -477,6 +511,7 @@ void MeshService::sendToPhone(meshtastic_MeshPacket *p)
     fromNum++;
 }
 
+#if !MESHTASTIC_EXCLUDE_MQTT
 void MeshService::sendMqttMessageToClientProxy(meshtastic_MqttClientProxyMessage *m)
 {
     LOG_DEBUG("Send mqtt message on topic '%s' to client for proxy", m->topic);
@@ -494,6 +529,7 @@ void MeshService::sendMqttMessageToClientProxy(meshtastic_MqttClientProxyMessage
     }
     fromNum++;
 }
+#endif
 
 void MeshService::sendRoutingErrorResponse(meshtastic_Routing_Error error, const meshtastic_MeshPacket *mp)
 {

@@ -31,9 +31,8 @@ class LockingArduinoHal : public ArduinoHal
 
     void spiBeginTransaction() override;
     void spiEndTransaction() override;
-#if ARCH_PORTDUINO
+#if ARCH_PORTDUINO || defined(ARCH_NRF52)
     void spiTransfer(uint8_t *out, size_t len, uint8_t *in) override;
-
 #endif
 };
 

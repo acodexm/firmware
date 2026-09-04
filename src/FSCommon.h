@@ -48,8 +48,8 @@ using namespace STM32_LittleFS_Namespace;
 using namespace Adafruit_LittleFS_Namespace;
 #endif
 
-#if defined(ARCH_NRF54L15)
-// nRF54L15 - Zephyr LittleFS on 36 KB storage_partition (internal RRAM)
+#if defined(ARCH_NRF54L15) || defined(ARCH_ZEPHYR)
+// Zephyr LittleFS on the board's storage_partition.
 #include "InternalFileSystem.h"
 #define FSCom InternalFS
 #define FSBegin() FSCom.begin()
