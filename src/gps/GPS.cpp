@@ -24,6 +24,10 @@
 #include "cas.h"
 #include "ubx.h"
 
+#ifdef RUNA_GNSS_GSA_QUALITY
+#include "runa/gps/NmeaGsaQualityParser.h"
+#endif
+
 #ifdef ARCH_PORTDUINO
 #include "GpsdSerial.h"
 #include "PortduinoGlue.h"
@@ -77,6 +81,10 @@ static struct uBloxGnssModelInfo {
 
 namespace
 {
+#ifdef RUNA_GNSS_GSA_QUALITY
+runa::gps::NmeaGsaQualityParser gsaQualityParser;
+#endif
+
 // Versioned on-disk record for persisted GPS probe results.
 constexpr uint32_t GPS_PROBE_CACHE_MAGIC = 0x47504348UL; // "GPCH"
 constexpr uint16_t GPS_PROBE_CACHE_VERSION = 1;
@@ -864,8 +872,15 @@ bool GPS::setup()
             // Initialize the L76K Chip, use GPS + GLONASS + BEIDOU
             _serial_gps->write("$PCAS04,7*1E\r\n");
             delay(250);
+            // Runa also consumes GSA for the receiver's checksum-valid PDOP and
+            // 3D-fix state. Keep the upstream traffic-minimized configuration
+            // for builds that do not use that quality signal.
+#ifdef RUNA_GNSS_GSA_QUALITY
+            _serial_gps->write("$PCAS03,1,0,1,0,1,0,0,0,0,0,,,0,0*03\r\n");
+#else
             // only ask for RMC and GGA
             _serial_gps->write("$PCAS03,1,0,0,0,1,0,0,0,0,0,,,0,0*02\r\n");
+#endif
             delay(250);
             // Switch to Vehicle Mode, since SoftRF enables Aviation < 2g
             _serial_gps->write("$PCAS11,3*1E\r\n");
@@ -2130,8 +2145,19 @@ bool GPS::lookForLocation()
 
     p.location_source = meshtastic_Position_LocSource_LOC_INTERNAL;
 
-    // Dilution of precision (an accuracy metric) is reported in 10^2 units, so we need to scale down when we use it
-#ifndef TINYGPS_OPTION_NO_CUSTOM_FIELDS
+    // Dilution of precision is carried in centi-DOP. Runa parses GSA with a
+    // bounded, checksum-validating adapter because Meshtastic disables the
+    // TinyGPSCustom path after historical pointer corruption.
+#ifdef RUNA_GNSS_GSA_QUALITY
+    runa::gps::GsaQuality gsaQuality;
+    if (gsaQualityParser.current(millis(), GPS_SOL_EXPIRY_MS, gsaQuality) && gsaQuality.fixType == 3U) {
+        p.PDOP = gsaQuality.pdopCenti;
+        p.fix_type = gsaQuality.fixType;
+    } else {
+        p.PDOP = 0;
+        p.fix_type = 0;
+    }
+#elif !defined(TINYGPS_OPTION_NO_CUSTOM_FIELDS)
     p.HDOP = reader.hdop.value();
     p.PDOP = TinyGPSPlus::parseDecimal(gsapdop.value());
 #else
@@ -2141,11 +2167,10 @@ bool GPS::lookForLocation()
     p.PDOP = 1.41 * reader.hdop.value();
 #endif
 
-    // Discard incomplete or erroneous readings
-    if (reader.hdop.value() == 0) {
-        LOG_WARN("BOGUS hdop.value() REJECTED: %d", reader.hdop.value());
-        return false;
-    }
+    const bool hasFreshHdop = reader.hdop.isValid() && reader.hdop.age() < GPS_SOL_EXPIRY_MS;
+    p.HDOP = hasFreshHdop ? reader.hdop.value() : 0;
+    if (!hasFreshHdop)
+        LOG_WARN("HDOP unavailable for current GNSS fix");
 
     p.latitude_i = toDegInt(loc.lat);
     p.longitude_i = toDegInt(loc.lng);
@@ -2226,6 +2251,9 @@ bool GPS::whileActive()
     while (_serial_gps->available() > 0) {
         int c = _serial_gps->read();
         UBXscratch[charsInBuf] = c;
+#ifdef RUNA_GNSS_GSA_QUALITY
+        gsaQualityParser.ingest(static_cast<char>(c), millis());
+#endif
 #ifdef GPS_DEBUG
         debugmsg += vformat("%c", (c >= 32 && c <= 126) ? c : '.');
 #endif

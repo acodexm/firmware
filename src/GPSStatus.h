@@ -125,9 +125,10 @@ class GPSStatus : public Status
         if (isDirty) {
             if (hasLock) {
                 // In debug logs, identify position by @timestamp:stage (stage 3 = notify)
-                LOG_DEBUG("New GPS pos@%x:3 lat=%f lon=%f alt=%d pdop=%.2f track=%.2f speed=%.2f sats=%d", p.timestamp,
-                          p.latitude_i * 1e-7, p.longitude_i * 1e-7, p.altitude, p.PDOP * 1e-2, p.ground_track * 1e-5,
-                          p.ground_speed * 1e-2, p.sats_in_view);
+                LOG_DEBUG("New GPS pos@%x:3 lat=%f lon=%f alt=%d pdop=%lu.%02lu track=%.2f speed=%.2f sats=%d", p.timestamp,
+                          p.latitude_i * 1e-7, p.longitude_i * 1e-7, p.altitude, static_cast<unsigned long>(p.PDOP / 100U),
+                          static_cast<unsigned long>(p.PDOP % 100U), p.ground_track * 1e-5, p.ground_speed * 1e-2,
+                          p.sats_in_view);
             } else {
                 LOG_DEBUG("No GPS lock");
             }
