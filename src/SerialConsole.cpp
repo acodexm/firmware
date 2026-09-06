@@ -120,6 +120,12 @@ int32_t SerialConsole::runOnce()
     }
 #endif
 
+#if MESHTASTIC_EXCLUDE_SERIAL_API
+    // Bound discarded input so a host cannot monopolize the runtime.
+    for (unsigned i = 0; i < 64 && Port.available(); ++i)
+        Port.read();
+    return 20;
+#else
     int32_t delay = runOncePart();
 #if defined(SERIAL_HAS_ON_RECEIVE) || defined(CONFIG_IDF_TARGET_ESP32S2)
     return Port.available() ? delay : INT32_MAX;
@@ -127,6 +133,7 @@ int32_t SerialConsole::runOnce()
     return HWCDC::isPlugged() ? delay : (1000 * 20);
 #else
     return delay;
+#endif
 #endif
 }
 
@@ -242,6 +249,11 @@ bool SerialConsole::writeFrame(uint8_t *buf, size_t len, bool bestEffort)
  */
 bool SerialConsole::handleToRadio(const uint8_t *buf, size_t len)
 {
+#if MESHTASTIC_EXCLUDE_SERIAL_API
+    (void)buf;
+    (void)len;
+    return false;
+#else
     // only talk to the API once the configuration has been loaded and we're sure the serial port is not disabled.
     if (config.has_lora && config.security.serial_enabled) {
         // The host just sent us bytes, so it is alive and draining the port:
@@ -256,6 +268,7 @@ bool SerialConsole::handleToRadio(const uint8_t *buf, size_t len)
     } else {
         return false;
     }
+#endif
 }
 
 /// Route logs without allowing raw bytes into an active protobuf stream.

@@ -174,7 +174,6 @@ void MeshService::reloadOwner(bool shouldSave)
     // LOG_DEBUG("reloadOwner()");
     // update our local data directly
     nodeDB->updateUser(nodeDB->getNodeNum(), owner);
-    assert(nodeInfoModule);
     // update everyone else and save to disk
     if (nodeInfoModule && shouldSave) {
         nodeInfoModule->sendOurNodeInfo();

@@ -26,6 +26,7 @@
 #include "main.h"
 #include "mesh/PhoneAPI.h"
 #include "mesh/mesh-pb-constants.h"
+#include "target_specific.h"
 
 #include <atomic>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -40,7 +41,11 @@
 // ─────────────────────── Syntax: replace hyphens with commas, prefix 0x -
 // matches BT_UUID_128_ENCODE doc.
 
+#ifdef MESHTASTIC_BLE_SERVICE_UUID
+#define MESH_SVC_UUID_VAL MESHTASTIC_BLE_SERVICE_UUID
+#else
 #define MESH_SVC_UUID_VAL BT_UUID_128_ENCODE(0x6ba1b218, 0x15a8, 0x461f, 0x9fa8, 0x5dcae273eafd)
+#endif
 #define FROMNUM_UUID_VAL BT_UUID_128_ENCODE(0xed9da18c, 0xa800, 0x4f66, 0xa670, 0xaa7547e34453)
 #define FROMRADIO_UUID_VAL BT_UUID_128_ENCODE(0x2c55e69e, 0x4993, 0x11ed, 0xb878, 0x0242ac120002)
 #define TORADIO_UUID_VAL BT_UUID_128_ENCODE(0xf75c76d2, 0x129e, 0x4dad, 0xa1dd, 0x7866124401e7)
@@ -640,7 +645,15 @@ static bool zephyr_bt_init_common()
             LOG_WARN("BLE settings load failed: %d", err);
     }
 
+#ifdef MESHTASTIC_BLE_NAME_PREFIX
+    uint8_t address[6];
+    getMacAddr(address);
+    char name[20];
+    snprintf(name, sizeof(name), MESHTASTIC_BLE_NAME_PREFIX "_%02x%02x", address[4], address[5]);
+    bt_set_name(name);
+#else
     bt_set_name(getDeviceName());
+#endif
     return true;
 }
 
