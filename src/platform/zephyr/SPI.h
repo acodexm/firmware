@@ -5,7 +5,7 @@
  *
  * Provides the Arduino SPIClass interface backed by Zephyr's SPI API. The
  * backing controller comes from the meshtastic-spi devicetree alias.
- * RadioLib uses ArduinoHal which calls transfer() byte-by-byte.
+ * RadioLib uses LockingArduinoHal to transfer each command as one buffer.
  *
  * CS pin is handled by RadioLib via digitalWrite() - hardware CS is not used.
  */
