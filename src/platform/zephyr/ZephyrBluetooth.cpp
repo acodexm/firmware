@@ -24,6 +24,7 @@
 #include "concurrency/OSThread.h"
 #include "configuration.h"
 #include "main.h"
+#include "mesh/NodeDB.h"
 #include "mesh/PhoneAPI.h"
 #include "mesh/mesh-pb-constants.h"
 #include "target_specific.h"
@@ -304,8 +305,27 @@ BT_GATT_SERVICE_DEFINE(
 // payload is 31 bytes:
 //   FLAGS (3B) + UUID128 (18B) = 21B in adv; NAME in scan-response (17B).
 
+static void update_device_name()
+{
+#ifdef MESHTASTIC_BLE_NAME_PREFIX
+    uint8_t address[6];
+    getMacAddr(address);
+    char name[20];
+    const char *prefix = owner.short_name[0] != '\0' ? owner.short_name : MESHTASTIC_BLE_NAME_PREFIX;
+    snprintf(name, sizeof(name), "%s_%02x%02x", prefix, address[4], address[5]);
+    const int err = bt_set_name(name);
+#else
+    const int err = bt_set_name(getDeviceName());
+#endif
+    if (err)
+        LOG_WARN("BLE device name update failed: %d", err);
+}
+
 static void start_advertising()
 {
+    // The owner may have changed while the companion was connected.
+    update_device_name();
+
     // IMPORTANT: BT_DATA_BYTES() uses C99 compound literals that GCC C++ treats
     // as temporaries; with -Os the compiler may elide writes, leaving stack
     // uninitialized.  Use static const arrays for stable data (flags, UUID)
@@ -645,15 +665,7 @@ static bool zephyr_bt_init_common()
             LOG_WARN("BLE settings load failed: %d", err);
     }
 
-#ifdef MESHTASTIC_BLE_NAME_PREFIX
-    uint8_t address[6];
-    getMacAddr(address);
-    char name[20];
-    snprintf(name, sizeof(name), MESHTASTIC_BLE_NAME_PREFIX "_%02x%02x", address[4], address[5]);
-    bt_set_name(name);
-#else
-    bt_set_name(getDeviceName());
-#endif
+    update_device_name();
     return true;
 }
 
