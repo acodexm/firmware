@@ -729,21 +729,64 @@ int ZephyrBluetooth::getRssi()
               // command
 }
 
+// Log transport accounting is boot-scoped and never logs from the send path.
+static struct k_spinlock logStatsLock;
+static ZephyrBluetooth::LogTransportStats logStats;
+
+static void recordLogOutcome(uint32_t ZephyrBluetooth::LogTransportStats::*counter, uint16_t mtu = 0, int error = 0)
+{
+    const auto key = k_spin_lock(&logStatsLock);
+    ++(logStats.*counter);
+    if (mtu != 0)
+        logStats.lastMtu = mtu;
+    if (error != 0)
+        logStats.lastNotifyError = error;
+    k_spin_unlock(&logStatsLock, key);
+}
+
+bool ZephyrBluetooth::isLogSubscribed() const
+{
+    return logradioCccValue.load() != 0;
+}
+
+ZephyrBluetooth::LogTransportStats ZephyrBluetooth::logTransportStats() const
+{
+    const auto key = k_spin_lock(&logStatsLock);
+    const auto result = logStats;
+    k_spin_unlock(&logStatsLock, key);
+    return result;
+}
+
 void ZephyrBluetooth::sendLog(const uint8_t *logMessage, size_t length)
 {
-    if (length > 512 || logradioCccValue.load() == 0) {
+    if (logMessage == nullptr || length == 0 || length > 512) {
+        recordLogOutcome(&LogTransportStats::invalid);
         return;
     }
-    // Acquire a reference under ble_mutex so disconnected_cb can't free the
-    // connection between the null check and bt_gatt_notify.
+    if (!isLogSubscribed()) {
+        recordLogOutcome(&LogTransportStats::unsubscribed);
+        return;
+    }
     struct bt_conn *conn = acquire_active_conn();
     if (!conn) {
+        recordLogOutcome(&LogTransportStats::disconnected);
         return;
     }
-    // Send as notify regardless of whether client subscribed to NOTIFY or
-    // INDICATE - bt_gatt_indicate() requires a params struct with a callback;
-    // notify is simpler and the app accepts both. Change to indicate if
-    // compatibility issues arise.
-    bt_gatt_notify(conn, &mesh_svc.attrs[LOGRADIO_ATTR_IDX], logMessage, (uint16_t)length);
+    const uint16_t mtu = bt_gatt_get_mtu(conn);
+    // ATT notification opcode and handle consume three bytes of the negotiated MTU.
+    if (mtu <= 3 || length > static_cast<size_t>(mtu - 3)) {
+        bt_conn_unref(conn);
+        recordLogOutcome(&LogTransportStats::mtuExceeded, mtu);
+        return;
+    }
+    const int result = bt_gatt_notify(conn, &mesh_svc.attrs[LOGRADIO_ATTR_IDX], logMessage, static_cast<uint16_t>(length));
     bt_conn_unref(conn);
+    if (result == 0)
+        recordLogOutcome(&LogTransportStats::submitted, mtu);
+    else if (result == -ENOMEM || result == -ENOBUFS)
+        recordLogOutcome(&LogTransportStats::noBuffers, mtu, result);
+    else if (result == -ENOTCONN)
+        recordLogOutcome(&LogTransportStats::disconnected, mtu, result);
+    else
+        recordLogOutcome(&LogTransportStats::notifyErrors, mtu, result);
 }
