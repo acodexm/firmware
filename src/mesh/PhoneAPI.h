@@ -86,14 +86,18 @@ class PhoneAPI
     /// downloads it
     meshtastic_MeshPacket *packetForPhone = NULL;
 
+#ifndef MESHTASTIC_EXCLUDE_XMODEM
     // file transfer packets destined for phone. Push it to the queue then free it.
     meshtastic_XModem xmodemPacketForPhone = meshtastic_XModem_init_zero;
+#endif
 
     // Keep QueueStatus packet just as packetForPhone
     meshtastic_QueueStatus *queueStatusPacketForPhone = NULL;
 
-    // Keep MqttClientProxyMessage packet just as packetForPhone
+// Keep MqttClientProxyMessage packet just as packetForPhone
+#if !MESHTASTIC_EXCLUDE_MQTT
     meshtastic_MqttClientProxyMessage *mqttClientProxyMessageForPhone = NULL;
+#endif
 
     // Keep ClientNotification packet just as packetForPhone
     meshtastic_ClientNotification *clientNotification = NULL;
@@ -295,7 +299,9 @@ class PhoneAPI
     void advanceReplayPhase();
     bool replayPending() const { return replayPhase != REPLAY_PHASE_IDLE; }
 
+#if !MESHTASTIC_EXCLUDE_MQTT
     void releaseMqttClientProxyPhonePacket();
+#endif
 
     void releaseClientNotification();
 

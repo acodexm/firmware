@@ -2287,6 +2287,7 @@ bool Screen::isGamesFrameShown()
 graphics::Screen::Screen(ScanI2C::DeviceAddress, meshtastic_Config_DisplayConfig_OledType, OLEDDISPLAY_GEOMETRY) {}
 #endif // HAS_SCREEN
 
+#if HAS_SCREEN
 bool shouldWakeOnReceivedMessage()
 {
     /*
@@ -2308,3 +2309,4 @@ bool shouldWakeOnReceivedMessage()
     }
     return true;
 }
+#endif

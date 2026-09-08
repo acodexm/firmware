@@ -30,14 +30,13 @@
 FakeFsm powerFSM;
 void PowerFSM_setup(){};
 #else
+#if defined(RUNA_EXTERNAL_POWER_ADAPTER)
+extern "C" bool runaExternalPowerPresent();
+#endif
+
 /// Should we behave as if we have AC power now?
 static bool isPowered()
 {
-// Circumvent the battery sensing logic and assumes constant power if no battery pin or power mgmt IC
-#if !defined(BATTERY_PIN) && !defined(HAS_AXP192) && !defined(HAS_AXP2101) && !defined(NRF_APM)
-    return true;
-#endif
-
     bool isRouter = ((config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER ||
                       config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE)
                          ? 1
@@ -46,6 +45,13 @@ static bool isPowered()
     // If we are not a router and we already have AC power go to POWER state after init, otherwise go to ON
     // We assume routers might be powered all the time, but from a low current (solar) source
     bool isPowerSavingMode = config.power.is_power_saving || isRouter;
+
+#if defined(RUNA_EXTERNAL_POWER_ADAPTER)
+    return !isPowerSavingMode && runaExternalPowerPresent();
+#elif !defined(BATTERY_PIN) && !defined(HAS_AXP192) && !defined(HAS_AXP2101) && !defined(NRF_APM)
+    // Circumvent the battery sensing logic and assume constant power if no battery pin or power management IC exists.
+    return true;
+#else
 
     /* To determine if we're externally powered, assumptions
         1) If we're powered up and there's no battery, we must be getting power externally. (because we'd be dead otherwise)
@@ -56,6 +62,7 @@ static bool isPowered()
        external power source (see `isVbusIn()` in `Power.cpp`)
     */
     return !isPowerSavingMode && powerStatus && (!powerStatus->getHasBattery() || powerStatus->getHasUSB());
+#endif
 }
 
 static bool isBluetoothEnabledForPowerFSM()

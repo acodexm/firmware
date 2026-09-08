@@ -7,8 +7,11 @@
 #include "PacketHistory.h"
 #include "PointerQueue.h"
 #include "RadioInterface.h"
+#include "StaticPointerQueue.h"
 #include "concurrency/OSThread.h"
 #include <memory>
+
+inline constexpr int MAX_RX_FROMRADIO = 4;
 
 /**
  * A mesh aware router that supports multiple interfaces.
@@ -18,7 +21,11 @@ class Router : protected concurrency::OSThread, protected PacketHistory
   private:
     /// Packets which have just arrived from the radio, ready to be processed by this service and possibly
     /// forwarded to the phone.
+#ifdef ARCH_PORTDUINO
     PointerQueue<meshtastic_MeshPacket> fromRadioQueue;
+#else
+    StaticPointerQueue<meshtastic_MeshPacket, MAX_RX_FROMRADIO> fromRadioQueue;
+#endif
 
   protected:
     std::unique_ptr<RadioInterface> iface = nullptr;

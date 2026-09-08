@@ -62,8 +62,6 @@ struct UIFrameEvent {
  */
 class MeshModule
 {
-    static std::vector<MeshModule *> *modules;
-
   public:
     /** Constructor
      * name is for debugging output

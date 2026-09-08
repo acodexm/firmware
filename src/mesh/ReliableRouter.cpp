@@ -134,7 +134,7 @@ void ReliableRouter::sniffReceived(const meshtastic_MeshPacket *p, const meshtas
         }
         if (p->which_payload_variant == meshtastic_MeshPacket_decoded_tag && c &&
             c->error_reason == meshtastic_Routing_Error_PKI_UNKNOWN_PUBKEY) {
-            if (owner.public_key.size == 32) {
+            if (nodeInfoModule && owner.public_key.size == 32) {
                 LOG_INFO("PKI decrypt failure, send a NodeInfo");
                 nodeInfoModule->sendOurNodeInfo(p->from, false, p->channel, true);
             }

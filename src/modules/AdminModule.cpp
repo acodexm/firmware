@@ -53,7 +53,6 @@
 #include "GPS.h"
 #endif
 
-#include <RNG.h>      // CryptRNG, the seeded CSPRNG used as fallback for the session passkey
 #include <Throttle.h> // rollover-safe elapsed-time checks for the session passkey
 
 #if MESHTASTIC_EXCLUDE_GPS
@@ -833,7 +832,8 @@ void AdminModule::handleSetOwner(const meshtastic_User &o)
     if (changed) { // If nothing really changed, don't broadcast on the network or write to flash
         service->reloadOwner(!hasOpenEditTransaction);
         saveChanges(SEGMENT_DEVICESTATE | SEGMENT_NODEDATABASE | (identityUpdated ? SEGMENT_CONFIG : 0) |
-                    (channelsSanitized ? SEGMENT_CHANNELS : 0));
+                        (channelsSanitized ? SEGMENT_CHANNELS : 0),
+                    false);
     }
 }
 
@@ -1817,6 +1817,10 @@ void AdminModule::handleGetDeviceConnectionStatus(const meshtastic_MeshPacket &r
     if (config.bluetooth.enabled && nrf54l15Bluetooth) {
         conn.bluetooth.is_connected = nrf54l15Bluetooth->isConnected();
     }
+#elif defined(ARCH_ZEPHYR)
+    if (config.bluetooth.enabled && zephyrBluetooth) {
+        conn.bluetooth.is_connected = zephyrBluetooth->isConnected();
+    }
 #endif
 #endif
     conn.has_serial = true; // No serial-less devices
@@ -1991,16 +1995,22 @@ void AdminModule::setPassKey(meshtastic_AdminMessage *res)
     // Regenerate once there is no session yet or the current key is older than 150s. session_time
     // holds millis(); the Throttle check is rollover-safe, unlike the previous seconds comparison.
     if (!sessionPasskeyValid || !Throttle::isWithinTimespanMs(session_time, 150 * 1000UL)) {
-        // Session passkey authenticates admin replies, so it must be unpredictable: prefer the
-        // hardware RNG, falling back to the seeded CSPRNG only when no hardware source exists.
-        // Hold cryptLock like the signing path does: this runs on the admin receive path, which on
-        // nRF52 is the BLE task, and the fill toggles the CC310 that packet crypto also uses while
-        // the CryptRNG state is shared with signing.
+        // Session passkeys must be unpredictable. Leave the response without a passkey if the
+        // platform CSPRNG fails so no subsequent admin mutation can authenticate with stale state.
+        uint8_t newPasskey[sizeof(session_passkey)] = {};
+        bool passkeyGenerated = false;
         {
             concurrency::LockGuard g(cryptLock);
-            if (!HardwareRNG::fill(session_passkey, sizeof(session_passkey)))
-                CryptRNG.rand(session_passkey, sizeof(session_passkey));
+            passkeyGenerated = HardwareRNG::fill(newPasskey, sizeof(newPasskey));
         }
+        if (!passkeyGenerated) {
+            LOG_ERROR("CSPRNG unavailable; admin session passkey was not issued");
+            memset(session_passkey, 0, sizeof(session_passkey));
+            sessionPasskeyValid = false;
+            res->session_passkey.size = 0;
+            return;
+        }
+        memcpy(session_passkey, newPasskey, sizeof(session_passkey));
         session_time = millis();
         sessionPasskeyValid = true;
     }
@@ -2498,6 +2508,9 @@ void disableBluetooth()
 #elif defined(ARCH_NRF54L15)
     if (nrf54l15Bluetooth)
         nrf54l15Bluetooth->shutdown();
+#elif defined(ARCH_ZEPHYR)
+    if (zephyrBluetooth)
+        zephyrBluetooth->shutdown();
 #endif
 #endif
 }

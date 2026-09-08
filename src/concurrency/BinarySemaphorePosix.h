@@ -4,6 +4,8 @@
 
 #ifdef ARCH_PORTDUINO
 #include <pthread.h>
+#elif defined(__ZEPHYR__)
+#include <zephyr/kernel.h>
 #endif
 
 namespace concurrency
@@ -18,6 +20,8 @@ class BinarySemaphorePosix
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     bool signaled;
+#elif defined(__ZEPHYR__)
+    k_sem semaphore;
 #endif
 
   public:

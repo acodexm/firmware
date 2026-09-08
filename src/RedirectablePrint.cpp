@@ -48,6 +48,23 @@ size_t RedirectablePrint::write(uint8_t c)
               // serial port said (which could be zero)
 }
 
+size_t RedirectablePrint::write(const uint8_t *buffer, size_t size)
+{
+    if (buffer == nullptr)
+        return 0;
+
+#ifdef USE_SEGGER
+    for (size_t index = 0; index < size; ++index)
+        SEGGER_RTT_PutChar(SEGGER_STDOUT_CH, buffer[index]);
+#endif
+
+    const bool serialEnabled = config.has_security ? config.security.serial_enabled : config.device.serial_enabled;
+    if (!config.has_lora || serialEnabled)
+        dest->write(buffer, size);
+
+    return size;
+}
+
 size_t RedirectablePrint::vprintf(const char *logLevel, const char *format, va_list arg)
 {
     va_list copy;
@@ -80,17 +97,17 @@ size_t RedirectablePrint::vprintf(const char *logLevel, const char *format, va_l
     }
     if (color && logLevel != nullptr) {
         if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_DEBUG) == 0)
-            Print::write("\u001b[34m", 5);
+            write("\u001b[34m", 5);
         if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_INFO) == 0)
-            Print::write("\u001b[32m", 5);
+            write("\u001b[32m", 5);
         if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_WARN) == 0)
-            Print::write("\u001b[33m", 5);
+            write("\u001b[33m", 5);
         if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_ERROR) == 0)
-            Print::write("\u001b[31m", 5);
+            write("\u001b[31m", 5);
     }
-    len = Print::write(printBuf, len);
+    len = write(reinterpret_cast<const uint8_t *>(printBuf), len);
     if (color && logLevel != nullptr) {
-        Print::write("\u001b[0m", 4);
+        write("\u001b[0m", 4);
     }
     return len;
 }
@@ -224,15 +241,26 @@ void RedirectablePrint::log_to_ble(const char *logLevel, const char *format, va_
 #ifdef ARCH_ESP32
         isBleConnected = nimbleBluetooth && nimbleBluetooth->isActive() && nimbleBluetooth->isConnected();
 #elif defined(ARCH_NRF52)
-        isBleConnected = nrf52Bluetooth != nullptr && nrf52Bluetooth->isConnected();
+        isBleConnected = nrf52Bluetooth != nullptr && nrf52Bluetooth->isConnected() && nrf52Bluetooth->isLogSubscribed();
 #elif defined(ARCH_NRF54L15)
         isBleConnected = nrf54l15Bluetooth != nullptr && nrf54l15Bluetooth->isConnected();
+#elif defined(ARCH_ZEPHYR)
+        isBleConnected = zephyrBluetooth != nullptr && zephyrBluetooth->isConnected();
 #endif
         if (isBleConnected) {
             auto thread = concurrency::OSThread::currentThread;
             meshtastic_LogRecord logRecord = meshtastic_LogRecord_init_zero;
             logRecord.level = getLogLevel(logLevel);
             vsnprintf(logRecord.message, sizeof(logRecord.message), format, arg);
+
+            // Field recording must not turn ordinary Mesh DEBUG/INFO traffic
+            // into a competing BLE workload. Runa's structured diagnostics are
+            // tagged at the message edge; retain those and upstream warnings
+            // or errors, which are useful failure evidence.
+            const bool isRunaDiagnostic = strncmp(logRecord.message, "Runa/", 5) == 0;
+            const bool isWarningOrWorse = logRecord.level >= meshtastic_LogRecord_Level_WARNING;
+            if (!isRunaDiagnostic && !isWarningOrWorse)
+                return;
             if (thread)
                 strlcpy(logRecord.source, thread->ThreadName.c_str(), sizeof(logRecord.source));
             logRecord.time = getValidTime(RTCQuality::RTCQualityDevice, true);
@@ -245,6 +273,8 @@ void RedirectablePrint::log_to_ble(const char *logLevel, const char *format, va_
             nrf52Bluetooth->sendLog(buffer.get(), size);
 #elif defined(ARCH_NRF54L15)
             nrf54l15Bluetooth->sendLog(buffer.get(), size);
+#elif defined(ARCH_ZEPHYR)
+            zephyrBluetooth->sendLog(buffer.get(), size);
 #endif
         }
     }

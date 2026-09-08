@@ -11,7 +11,7 @@
 #include <ErriezCRC32.h>
 #include <vector>
 
-#if defined(NRF52840_XXAA)
+#if defined(NRF52840_XXAA) && !defined(ARCH_ZEPHYR)
 #include "flash/flash_nrf5x.h"
 #define WARM_RING_MAGIC 0x334E5257u    // "WRN3" - v3: last_heard low bits carry role + protected + signer
 #define WARM_RING_MAGIC_V2 0x324E5257u // "WRN2" - v2: role + protected only; bit 6 was still timestamp.
@@ -66,7 +66,7 @@ WarmNodeStore::WarmNodeStore()
     entries = static_cast<WarmNodeEntry *>(calloc(WARM_NODE_COUNT, sizeof(WarmNodeEntry)));
 #endif
     memaudit::set("warm", entries ? WARM_NODE_COUNT * sizeof(WarmNodeEntry) : 0);
-#if defined(NRF52840_XXAA)
+#if defined(NRF52840_XXAA) && !defined(ARCH_ZEPHYR)
     memset(pageOf, kNoPage, sizeof(pageOf));
 #endif
 }
@@ -231,7 +231,7 @@ void WarmNodeStore::clear()
     if (!entries)
         return;
     memset(entries, 0, WARM_NODE_COUNT * sizeof(WarmNodeEntry));
-#if defined(NRF52840_XXAA)
+#if defined(NRF52840_XXAA) && !defined(ARCH_ZEPHYR)
     memset(pageOf, kNoPage, sizeof(pageOf));
 #endif
     persistClear();
@@ -257,7 +257,7 @@ bool WarmNodeStore::saveIfDirty()
     return ok;
 }
 
-#if defined(NRF52840_XXAA)
+#if defined(NRF52840_XXAA) && !defined(ARCH_ZEPHYR)
 
 // Raw-flash record-ring backend (nRF52840).
 // 3 × 4 KB pages below LittleFS. Mutations append 40 B records (entry snapshot,

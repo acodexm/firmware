@@ -30,9 +30,6 @@
 #include "serialization/MeshPacketSerializer.h"
 #endif
 
-#define MAX_RX_FROMRADIO                                                                                                         \
-    4 // max number of packets destined to our queue, we dispatch packets quickly so it doesn't need to be big
-
 // I think this is right, one packet for each of the three fifos + one packet being currently assembled for TX or RX
 // And every TX packet might have a retransmission packet or an ack alive at any moment
 
@@ -146,7 +143,12 @@ void resetRoutingAuthEvaluationCount()
  *
  * Currently we only allow one interface, that may change in the future
  */
-Router::Router() : concurrency::OSThread("Router"), fromRadioQueue(MAX_RX_FROMRADIO)
+Router::Router()
+    : concurrency::OSThread("Router")
+#ifdef ARCH_PORTDUINO
+      ,
+      fromRadioQueue(MAX_RX_FROMRADIO)
+#endif
 {
     // This is called pre main(), don't touch anything here, the following code is not safe
 
@@ -164,7 +166,6 @@ Router::Router() : concurrency::OSThread("Router"), fromRadioQueue(MAX_RX_FROMRA
     // Runtime default for the auth-cache snapshot policy. Keep it here, saves flash.
     routingAuthCache.policy = meshtastic_Config_SecurityConfig_PacketSignaturePolicy_PACKET_SIGNATURE_POLICY_BALANCED;
 }
-
 bool Router::shouldDecrementHopLimit(const meshtastic_MeshPacket *p)
 {
     // First hop MUST always decrement to prevent retry issues
@@ -1080,6 +1081,9 @@ meshtastic_Routing_Error perhapsEncode(meshtastic_MeshPacket *p)
                                         p->decoded.xeddsa_signature.bytes)) {
                     p->decoded.xeddsa_signature.size = XEDDSA_SIGNATURE_SIZE;
                     LOG_DEBUG("XEdDSA signed packet 0x%08x", p->id);
+                } else {
+                    LOG_ERROR("CSPRNG unavailable; refusing to send signed packet 0x%08x", p->id);
+                    return meshtastic_Routing_Error_PKI_FAILED;
                 }
             }
 #endif
@@ -1158,7 +1162,10 @@ meshtastic_Routing_Error perhapsEncode(meshtastic_MeshPacket *p)
                          *destKey.bytes);
                 return meshtastic_Routing_Error_PKI_FAILED;
             }
-            crypto->encryptCurve25519(p->to, getFrom(p), destKey, p->id, numbytes, bytes, p->encrypted.bytes);
+            if (!crypto->encryptCurve25519(p->to, getFrom(p), destKey, p->id, numbytes, bytes, p->encrypted.bytes)) {
+                LOG_ERROR("PKI encryption failed for packet 0x%08x", p->id);
+                return meshtastic_Routing_Error_PKI_FAILED;
+            }
             numbytes += MESHTASTIC_PKC_OVERHEAD;
             p->channel = 0;
             p->pki_encrypted = true;

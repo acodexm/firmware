@@ -8,7 +8,7 @@
 #include "platform/portduino/PortduinoGlue.h"
 #endif
 #include "Throttle.h"
-
+#include <new>
 #define RECENT_WARN_AGE (10 * 60 * 1000L) // Warn if the packet that gets removed was more recent than 10 min
 
 #define VERBOSE_PACKET_HISTORY 0     // Set to 1 for verbose logging, 2 for heavy debugging
@@ -31,7 +31,7 @@ PacketHistory::PacketHistory(uint32_t size) : recentPacketsCapacity(0) // Initia
 
     // Allocate memory for the recent packets array
     recentPacketsCapacity = size;
-    recentPackets.reset(new PacketRecord[recentPacketsCapacity]);
+    recentPackets.reset(new (std::nothrow) PacketRecord[recentPacketsCapacity]);
     if (!recentPackets) { // No logging here, console/log probably uninitialized yet.
         LOG_ERROR("Packet History - Memory allocation failed for size=%d entries / %d Bytes", size,
                   sizeof(PacketRecord) * recentPacketsCapacity);
@@ -47,7 +47,7 @@ PacketHistory::PacketHistory(uint32_t size) : recentPacketsCapacity(0) // Initia
     // Allocate hash index with load factor <= 0.5 for short probe chains
     hashCapacity = nextPowerOf2(recentPacketsCapacity * 2);
     hashMask = hashCapacity - 1;
-    hashIndex.reset(new uint16_t[hashCapacity]);
+    hashIndex.reset(new (std::nothrow) uint16_t[hashCapacity]);
     if (!hashIndex) {
         LOG_ERROR("Packet History - Hash index allocation failed for %d entries", hashCapacity);
         hashCapacity = 0;
@@ -406,10 +406,10 @@ void PacketHistory::insert(const PacketRecord &r)
 
 #if PACKET_HISTORY_TRACE_AGING
     if (tu->rxTimeMsec != 0) {
-        LOG_INFO("Packet History - insert: Reusing slot aged %.3fs TRACE %s", OldtrxTimeMsec / 1000.,
+        LOG_INFO("Packet History - insert: Reusing slot aged %lums TRACE %s", (unsigned long)OldtrxTimeMsec,
                  (tu->id == r.id && tu->sender == r.sender) ? "MATCHED PACKET" : "OLDEST SLOT");
     } else {
-        LOG_INFO("Packet History - insert: Using new slot @uptime %.3fs TRACE NEW", millis() / 1000.);
+        LOG_INFO("Packet History - insert: Using new slot @uptime %lums TRACE NEW", (unsigned long)millis());
     }
 #endif
 

@@ -377,7 +377,10 @@ std::unique_ptr<RadioInterface> initLoRa()
 #if ARCH_PORTDUINO
     SPISettings loraSpiSettings(portduino_config.spiSpeed, MSBFIRST, SPI_MODE0);
 #else
-    SPISettings loraSpiSettings(4000000, MSBFIRST, SPI_MODE0);
+#ifndef LORA_SPI_FREQUENCY
+#define LORA_SPI_FREQUENCY 4000000
+#endif
+    SPISettings loraSpiSettings(LORA_SPI_FREQUENCY, MSBFIRST, SPI_MODE0);
 #endif
 
 #ifdef ARCH_PORTDUINO
