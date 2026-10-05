@@ -4,7 +4,6 @@
 #include "Print.h"
 #include "mesh/generated/meshtastic/mesh.pb.h"
 #include <stdarg.h>
-#include <string>
 
 /**
  * A Printable that can be switched to squirt its bytes to a different sink.
@@ -35,21 +34,13 @@ class RedirectablePrint : public Print
     virtual size_t write(uint8_t c);
     size_t write(const uint8_t *buffer, size_t size) override;
 
-    /**
-     * Debug logging print message
-     *
-     * If the provide format string ends with a newline we assume it is the final print of a single
-     * log message.  Otherwise we assume more prints will come before the log message ends.  This
-     * allows you to call logDebug a few times to build up a single log message line if you wish.
-     */
+    /// Emit one log record to enabled sinks; serial records end with a newline.
     void log(const char *logLevel, const char *format, ...) __attribute__((format(printf, 3, 4)));
 
     /** like printf but va_list based */
     size_t vprintf(const char *logLevel, const char *format, va_list arg);
 
     void hexDump(const char *logLevel, const unsigned char *buf, uint16_t len);
-
-    std::string mt_sprintf(const std::string fmt_str, ...);
 
   protected:
     /// Subclasses can override if they need to change how we format over the serial port

@@ -9,7 +9,7 @@
 #include <assert.h>
 #include <cstring>
 #include <memory>
-#include <stdexcept>
+#include <new>
 #include <sys/time.h>
 #include <time.h>
 
@@ -196,6 +196,7 @@ void RedirectablePrint::log_to_serial(const char *logLevel, const char *format, 
 #endif // DEBUG_HEAP
 
     r += vprintf(logLevel, format, arg);
+    write(static_cast<uint8_t>('\n'));
 }
 
 void RedirectablePrint::log_to_syslog(const char *logLevel, const char *format, va_list arg)
@@ -265,7 +266,9 @@ void RedirectablePrint::log_to_ble(const char *logLevel, const char *format, va_
                 strlcpy(logRecord.source, thread->ThreadName.c_str(), sizeof(logRecord.source));
             logRecord.time = getValidTime(RTCQuality::RTCQualityDevice, true);
 
-            auto buffer = std::unique_ptr<uint8_t[]>(new uint8_t[meshtastic_LogRecord_size]);
+            auto buffer = std::unique_ptr<uint8_t[]>(new (std::nothrow) uint8_t[meshtastic_LogRecord_size]);
+            if (!buffer)
+                return;
             size_t size = pb_encode_to_bytes(buffer.get(), meshtastic_LogRecord_size, meshtastic_LogRecord_fields, &logRecord);
 #ifdef ARCH_ESP32
             nimbleBluetooth->sendLog(buffer.get(), size);
@@ -311,13 +314,6 @@ meshtastic_LogRecord_Level RedirectablePrint::getLogLevel(const char *logLevel)
 void RedirectablePrint::log(const char *logLevel, const char *format, ...)
 {
 
-    // append \n to format
-    size_t len = strlen(format);
-    auto newFormat = std::unique_ptr<char[]>(new char[len + 2]);
-    strcpy(newFormat.get(), format);
-    newFormat[len] = '\n';
-    newFormat[len + 1] = '\0';
-
 #if ARCH_PORTDUINO
     // level trace is special, two possible ways to handle it.
     if (strcmp(logLevel, MESHTASTIC_LOG_LEVEL_TRACE) == 0) {
@@ -359,14 +355,14 @@ void RedirectablePrint::log(const char *logLevel, const char *format, ...)
         va_start(arg, format);
 
         va_copy(arg_copy, arg);
-        log_to_serial(logLevel, newFormat.get(), arg_copy);
+        log_to_serial(logLevel, format, arg_copy);
         va_end(arg_copy);
 
         va_copy(arg_copy, arg);
-        log_to_syslog(logLevel, newFormat.get(), arg_copy);
+        log_to_syslog(logLevel, format, arg_copy);
         va_end(arg_copy);
 
-        log_to_ble(logLevel, newFormat.get(), arg);
+        log_to_ble(logLevel, format, arg);
 
         va_end(arg);
 #ifdef HAS_FREE_RTOS
@@ -407,23 +403,4 @@ void RedirectablePrint::hexDump(const char *logLevel, const unsigned char *buf, 
         log(logLevel, s);
     }
     log(logLevel, "    +------------------------------------------------+ +----------------+");
-}
-
-std::string RedirectablePrint::mt_sprintf(const std::string fmt_str, ...)
-{
-    int n = ((int)fmt_str.size()) * 2; /* Reserve two times as much as the length of the fmt_str */
-    std::unique_ptr<char[]> formatted;
-    va_list ap;
-    while (1) {
-        formatted.reset(new char[n]); /* Wrap the plain char array into the unique_ptr */
-        strcpy(&formatted[0], fmt_str.c_str());
-        va_start(ap, fmt_str);
-        int final_n = vsnprintf(&formatted[0], n, fmt_str.c_str(), ap);
-        va_end(ap);
-        if (final_n < 0 || final_n >= n)
-            n += abs(final_n - n + 1);
-        else
-            break;
-    }
-    return std::string(formatted.get());
 }
