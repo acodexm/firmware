@@ -33,10 +33,15 @@ void LockingArduinoHal::spiEndTransaction()
     spiLock->unlock();
 }
 
-#if ARCH_PORTDUINO
+#if ARCH_PORTDUINO || defined(ARCH_NRF52) || defined(ARCH_ZEPHYR)
 void LockingArduinoHal::spiTransfer(uint8_t *out, size_t len, uint8_t *in)
 {
+    // Avoid one native SPI transaction per byte on DMA-backed platforms.
+#if defined(ARCH_ZEPHYR)
+    spi->transferBytes(out, in, len);
+#else
     spi->transfer(out, in, len);
+#endif
 }
 #endif
 

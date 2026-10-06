@@ -181,7 +181,7 @@ void setupModules()
         atakPluginModule = new AtakPluginModule();
     }
 #endif
-#if !MESHTASTIC_EXCLUDE_PKI
+#if !MESHTASTIC_EXCLUDE_PKI && !MESHTASTIC_EXCLUDE_KEYVERIFICATION
     keyVerificationModule = new KeyVerificationModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_DROPZONE

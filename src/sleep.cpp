@@ -1,5 +1,9 @@
 #include "configuration.h"
 
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+extern bool runaFlushMeshtasticPersistence(uint32_t timeoutMs);
+#endif
+
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "GPS.h"
 #endif
@@ -231,6 +235,19 @@ void doDeepSleep(uint32_t msecToWake, bool skipPreflight = false, bool skipSaveN
         LOG_INFO("Enter deep sleep for %u seconds", msecToWake / 1000);
     }
 
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+    // Drain durable state before preflight disables Bluetooth/radio/display.
+    // On failure the device remains in its fully operational state.
+    if (!skipSaveNodeDb)
+        nodeDB->saveToDisk();
+    if (transmitHistory)
+        transmitHistory->saveToDisk();
+    if (!runaFlushMeshtasticPersistence(5000)) {
+        LOG_ERROR("Timed out draining persistence before deep sleep");
+        return;
+    }
+#endif
+
     // not using wifi yet, but once we are this is needed to shutoff the radio hw
     // esp_wifi_stop();
     waitEnterSleep(skipPreflight, true);
@@ -253,12 +270,16 @@ void doDeepSleep(uint32_t msecToWake, bool skipPreflight = false, bool skipSaveN
         screen->doDeepSleep(); // datasheet says this will draw only 10ua
 
     if (!skipSaveNodeDb) {
+#ifndef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
         nodeDB->saveToDisk();
+#endif
     }
 
     // Persist broadcast transmit times so throttle survives reboot
+#ifndef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
     if (transmitHistory)
         transmitHistory->saveToDisk();
+#endif
 
 #ifdef PIN_POWER_EN
     digitalWrite(PIN_POWER_EN, LOW);

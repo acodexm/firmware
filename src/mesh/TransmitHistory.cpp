@@ -6,6 +6,11 @@
 
 #ifdef FSCom
 
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+extern bool runaMeshtasticPersistenceReady();
+extern bool runaQueueTransmitHistoryPersistence(bool remove);
+#endif
+
 TransmitHistory *transmitHistory = nullptr;
 
 TransmitHistory *TransmitHistory::getInstance()
@@ -87,14 +92,26 @@ void TransmitHistory::setLastSentToMesh(uint16_t key)
         const uint8_t flags = (getRTCQuality() == RTCQualityNone) ? ENTRY_FLAG_BOOT_RELATIVE : ENTRY_FLAG_NONE;
         history[key] = makeStoredTimestamp(now, flags);
         dirty = true;
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+        ++mutationGeneration;
+#endif
         // Don't flush to disk on every transmit - flash has limited write endurance.
         // The in-memory lastMillis map handles throttle during normal operation.
         // Disk is flushed: before deep sleep (sleep.cpp) and periodically here,
         // throttled to at most once per 5 minutes. Always save the first time
         // after boot so a crash-reboot loop can't avoid persisting.
-        if (lastDiskSave == 0 || !Throttle::isWithinTimespanMs(lastDiskSave, SAVE_INTERVAL_MS)) {
+        if (lastDiskSave == 0 || !Throttle::isWithinTimespanMs(lastDiskSave, SAVE_INTERVAL_MS)
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+            || asyncWritePending
+#endif
+        ) {
             if (saveToDisk()) {
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+                if (!asyncWritePending)
+                    lastDiskSave = millis();
+#else
                 lastDiskSave = millis();
+#endif
             }
         }
     }
@@ -212,23 +229,37 @@ bool TransmitHistory::saveToDisk()
         return true;
     }
 
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+    if (runaMeshtasticPersistenceReady()) {
+        const bool queued = runaQueueTransmitHistoryPersistence(false);
+        asyncWritePending = queued || asyncWritePending;
+        return queued;
+    }
+#endif
+
     spiLock->lock();
 
     FSCom.mkdir("/prefs");
 
+#ifdef MESHTASTIC_ATOMIC_TRANSMIT_HISTORY
+    constexpr const char *tempFilename = "/prefs/transmit_history.dat.tmp";
+    FSCom.remove(tempFilename);
+    auto file = FSCom.open(tempFilename, FILE_O_WRITE);
+#else
     // Remove old file first
     if (FSCom.exists(FILENAME)) {
         FSCom.remove(FILENAME);
     }
 
     auto file = FSCom.open(FILENAME, FILE_O_WRITE);
+#endif
     if (file) {
         FileHeader header{};
         header.magic = MAGIC;
         header.version = VERSION;
         header.count = (uint8_t)min((size_t)MAX_ENTRIES, history.size());
 
-        file.write((uint8_t *)&header, sizeof(header));
+        bool writeSucceeded = file.write((uint8_t *)&header, sizeof(header)) == sizeof(header);
 
         uint8_t written = 0;
         for (const auto &[key, stored] : history) {
@@ -238,11 +269,22 @@ bool TransmitHistory::saveToDisk()
             entry.key = key;
             entry.epochSeconds = stored.seconds;
             entry.flags = stored.flags;
-            file.write((uint8_t *)&entry, sizeof(entry));
+            writeSucceeded = file.write((uint8_t *)&entry, sizeof(entry)) == sizeof(entry) && writeSucceeded;
             written++;
         }
         file.flush();
         file.close();
+#ifdef MESHTASTIC_ATOMIC_TRANSMIT_HISTORY
+        if (writeSucceeded)
+            writeSucceeded = FSCom.rename(tempFilename, FILENAME);
+        if (!writeSucceeded)
+            FSCom.remove(tempFilename);
+#endif
+        if (!writeSucceeded) {
+            LOG_WARN("TransmitHistory: failed to replace history file");
+            spiLock->unlock();
+            return false;
+        }
         LOG_DEBUG("TransmitHistory: saved %u entries to disk", written);
         dirty = false;
         spiLock->unlock();
@@ -255,12 +297,57 @@ bool TransmitHistory::saveToDisk()
     return false;
 }
 
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+bool TransmitHistory::capturePersistence(uint8_t *destination, size_t capacity, size_t &lengthOut)
+{
+    lengthOut = 0;
+    const size_t count = min((size_t)MAX_ENTRIES, history.size());
+    const size_t required = sizeof(FileHeader) + count * sizeof(Entry);
+    if (destination == nullptr || required > capacity)
+        return false;
+    const FileHeader header{MAGIC, VERSION, static_cast<uint8_t>(count)};
+    memcpy(destination, &header, sizeof(header));
+    lengthOut = sizeof(header);
+    size_t written = 0;
+    for (const auto &[key, stored] : history) {
+        if (written++ >= count)
+            break;
+        const Entry entry{key, stored.seconds, stored.flags};
+        memcpy(destination + lengthOut, &entry, sizeof(entry));
+        lengthOut += sizeof(entry);
+    }
+    capturedGeneration = mutationGeneration;
+    return true;
+}
+
+void TransmitHistory::persistenceCompleted()
+{
+    if (capturedGeneration == mutationGeneration) {
+        dirty = false;
+        asyncWritePending = false;
+        lastDiskSave = millis();
+    }
+}
+#endif
+
 void TransmitHistory::clear()
 {
     history.clear();
     lastMillis.clear();
     dirty = false;
     lastDiskSave = 0; // so the next legit broadcast persists immediately
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+    ++mutationGeneration;
+    asyncWritePending = false;
+#endif
+
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+    if (runaMeshtasticPersistenceReady()) {
+        (void)runaQueueTransmitHistoryPersistence(true);
+        LOG_INFO("TransmitHistory: cleared in-memory state and queued persisted removal");
+        return;
+    }
+#endif
 
     spiLock->lock();
     if (FSCom.exists(FILENAME)) {

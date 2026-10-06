@@ -75,6 +75,10 @@ class TransmitHistory
      * @return true if the data is persisted (or there was nothing to write), false on write/open failure.
      */
     bool saveToDisk();
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+    bool capturePersistence(uint8_t *destination, size_t capacity, size_t &lengthOut);
+    void persistenceCompleted();
+#endif
 
     /**
      * Wipe in-memory throttle state + remove the on-disk file. Required
@@ -130,6 +134,11 @@ class TransmitHistory
     std::map<uint16_t, uint32_t> lastMillis;     // key -> millis() value (for runtime throttle)
     bool dirty = false;
     uint32_t lastDiskSave = 0; // millis() of last disk flush
+#ifdef RUNA_ASYNC_MESHTASTIC_PERSISTENCE
+    uint32_t mutationGeneration = 0;
+    uint32_t capturedGeneration = 0;
+    bool asyncWritePending = false;
+#endif
 };
 
 extern TransmitHistory *transmitHistory;

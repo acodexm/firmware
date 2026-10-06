@@ -79,6 +79,32 @@ IRAM_ATTR void BinarySemaphorePosix::giveFromISR(BaseType_t *pxHigherPriorityTas
     if (pxHigherPriorityTaskWoken)
         *pxHigherPriorityTaskWoken = true;
 }
+#elif defined(__ZEPHYR__)
+
+BinarySemaphorePosix::BinarySemaphorePosix()
+{
+    k_sem_init(&semaphore, 0, 1);
+}
+
+BinarySemaphorePosix::~BinarySemaphorePosix() {}
+
+bool BinarySemaphorePosix::take(uint32_t msec)
+{
+    return k_sem_take(&semaphore, K_MSEC(msec)) == 0;
+}
+
+void BinarySemaphorePosix::give()
+{
+    k_sem_give(&semaphore);
+}
+
+IRAM_ATTR void BinarySemaphorePosix::giveFromISR(BaseType_t *pxHigherPriorityTaskWoken)
+{
+    k_sem_give(&semaphore);
+    if (pxHigherPriorityTaskWoken)
+        *pxHigherPriorityTaskWoken = true;
+}
+
 #else
 
 BinarySemaphorePosix::BinarySemaphorePosix() {}

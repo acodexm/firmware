@@ -377,7 +377,10 @@ std::unique_ptr<RadioInterface> initLoRa()
 #if ARCH_PORTDUINO
     SPISettings loraSpiSettings(portduino_config.spiSpeed, MSBFIRST, SPI_MODE0);
 #else
-    SPISettings loraSpiSettings(4000000, MSBFIRST, SPI_MODE0);
+#ifndef LORA_SPI_FREQUENCY
+#define LORA_SPI_FREQUENCY 4000000
+#endif
+    SPISettings loraSpiSettings(LORA_SPI_FREQUENCY, MSBFIRST, SPI_MODE0);
 #endif
 
 #ifdef ARCH_PORTDUINO
@@ -844,58 +847,65 @@ uint32_t RadioInterface::getTxDelayMsecWeighted(meshtastic_MeshPacket *p)
 void printPacket(const char *prefix, const meshtastic_MeshPacket *p)
 {
 #if defined(DEBUG_PORT) && !defined(DEBUG_MUTE)
-    std::string out =
-        DEBUG_PORT.mt_sprintf("%s (id=0x%08x fr=0x%08x to=0x%08x, transport = %u, WantAck=%d, HopLim=%d Ch=%d", prefix, p->id,
-                              p->from, p->to, p->transport_mechanism, p->want_ack, p->hop_limit, p->channel);
+    // Packet diagnostics must remain usable while a content transfer owns the heap.
+    char out[512] = {};
+    size_t used = 0;
+    const auto append = [&out, &used](const char *format, auto... values) {
+        const size_t remaining = sizeof(out) - used;
+        int written;
+        if constexpr (sizeof...(values) == 0)
+            written = snprintf(out + used, remaining, "%s", format);
+        else
+            written = snprintf(out + used, remaining, format, values...);
+        if (written > 0)
+            used += std::min(static_cast<size_t>(written), remaining - 1);
+    };
+    append("%s (id=0x%08x fr=0x%08x to=0x%08x, transport = %u, WantAck=%d, HopLim=%d Ch=%d", prefix, p->id, p->from, p->to,
+           p->transport_mechanism, p->want_ack, p->hop_limit, p->channel);
     if (p->which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
         auto &s = p->decoded;
 
-        out += DEBUG_PORT.mt_sprintf(" Portnum=%d", s.portnum);
+        append(" Portnum=%d", s.portnum);
 
         if (s.want_response)
-            out += DEBUG_PORT.mt_sprintf(" WANTRESP");
+            append(" WANTRESP");
 
         if (p->pki_encrypted)
-            out += DEBUG_PORT.mt_sprintf(" PKI");
+            append(" PKI");
 
         if (s.source != 0)
-            out += DEBUG_PORT.mt_sprintf(" source=0x%08x", s.source);
+            append(" source=0x%08x", s.source);
 
         if (s.dest != 0)
-            out += DEBUG_PORT.mt_sprintf(" dest=0x%08x", s.dest);
+            append(" dest=0x%08x", s.dest);
 
         if (s.request_id)
-            out += DEBUG_PORT.mt_sprintf(" requestId=0x%08x", s.request_id);
+            append(" requestId=0x%08x", s.request_id);
 
-        /* now inside Data and therefore kinda opaque
-        if (s.which_ackVariant == SubPacket_success_id_tag)
-            out += DEBUG_PORT.mt_sprintf(" successId=%08x", s.ackVariant.success_id);
-        else if (s.which_ackVariant == SubPacket_fail_id_tag)
-            out += DEBUG_PORT.mt_sprintf(" failId=%08x", s.ackVariant.fail_id); */
     } else {
-        out += " encrypted";
-        out += DEBUG_PORT.mt_sprintf(" len=%d", p->encrypted.size + sizeof(PacketHeader));
+        append(" encrypted");
+        append(" len=%zu", p->encrypted.size + sizeof(PacketHeader));
     }
 
     if (p->rx_time != 0)
-        out += DEBUG_PORT.mt_sprintf(" rxtime=%u", p->rx_time);
+        append(" rxtime=%u", p->rx_time);
     if (p->rx_snr != 0.0)
-        out += DEBUG_PORT.mt_sprintf(" rxSNR=%g", p->rx_snr);
+        append(" rxSNR=%g", p->rx_snr);
     if (p->has_rx_rssi) // rx_rssi has explicit presence; a != 0 check would hide a genuine 0 dBm reading
-        out += DEBUG_PORT.mt_sprintf(" rxRSSI=%i", p->rx_rssi);
+        append(" rxRSSI=%i", p->rx_rssi);
     if (p->via_mqtt != 0)
-        out += DEBUG_PORT.mt_sprintf(" via MQTT");
+        append(" via MQTT");
     if (p->hop_start != 0)
-        out += DEBUG_PORT.mt_sprintf(" hopStart=%d", p->hop_start);
+        append(" hopStart=%d", p->hop_start);
     if (p->next_hop != 0)
-        out += DEBUG_PORT.mt_sprintf(" nextHop=0x%x", p->next_hop);
+        append(" nextHop=0x%x", p->next_hop);
     if (p->relay_node != 0)
-        out += DEBUG_PORT.mt_sprintf(" relay=0x%x", p->relay_node);
+        append(" relay=0x%x", p->relay_node);
     if (p->priority != 0)
-        out += DEBUG_PORT.mt_sprintf(" priority=%d", p->priority);
+        append(" priority=%d", p->priority);
 
-    out += ")";
-    LOG_DEBUG("%s", out.c_str());
+    append(")");
+    LOG_DEBUG("%s", out);
 #endif
 }
 

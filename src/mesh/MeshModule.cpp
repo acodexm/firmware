@@ -5,9 +5,76 @@
 #include "configuration.h"
 #include "modules/RoutingModule.h"
 #include <algorithm>
+#ifdef ARCH_ZEPHYR
+#include <array>
+#endif
 #include <assert.h>
+#include <vector>
 
-std::vector<MeshModule *> *MeshModule::modules;
+namespace
+{
+#ifdef ARCH_ZEPHYR
+constexpr size_t MAX_MESH_MODULES = 48;
+#endif
+
+class MeshModuleRegistry
+{
+  public:
+    void add(MeshModule *module)
+    {
+#ifdef ARCH_ZEPHYR
+        if (count >= entries.size()) {
+            assert(false && "Mesh module registry capacity exceeded");
+            return;
+        }
+        entries[count++] = module;
+#else
+        entries.push_back(module);
+#endif
+    }
+
+    void remove(MeshModule *module)
+    {
+#ifdef ARCH_ZEPHYR
+        auto end = entries.begin() + count;
+#else
+        auto end = entries.end();
+#endif
+        auto found = std::find(entries.begin(), end, module);
+        if (found == end) {
+            assert(false && "Mesh module missing from registry");
+            return;
+        }
+#ifdef ARCH_ZEPHYR
+        std::move(found + 1, end, found);
+        entries[--count] = nullptr;
+#else
+        entries.erase(found);
+#endif
+    }
+
+    auto begin() { return entries.begin(); }
+#ifdef ARCH_ZEPHYR
+    auto end() { return entries.begin() + count; }
+#else
+    auto end() { return entries.end(); }
+#endif
+
+  private:
+#ifdef ARCH_ZEPHYR
+    std::array<MeshModule *, MAX_MESH_MODULES> entries{};
+    size_t count = 0;
+#else
+    std::vector<MeshModule *> entries;
+#endif
+};
+
+MeshModuleRegistry &moduleRegistry()
+{
+    static MeshModuleRegistry registry;
+    return registry;
+}
+} // namespace
 
 const meshtastic_MeshPacket *MeshModule::currentRequest;
 uint8_t MeshModule::numPeriodicModules = 0;
@@ -20,11 +87,7 @@ meshtastic_MeshPacket *MeshModule::currentReply;
 
 MeshModule::MeshModule(const char *_name, meshtastic_PortNum _ourPortNum) : name(_name), ourPortNum(_ourPortNum)
 {
-    // Can't trust static initializer order, so we check each time
-    if (!modules)
-        modules = new std::vector<MeshModule *>();
-
-    modules->push_back(this);
+    moduleRegistry().add(this);
 }
 
 bool MeshModule::replyPortMatches(meshtastic_PortNum modulePort, const meshtastic_MeshPacket &mp)
@@ -37,9 +100,7 @@ void MeshModule::setup() {}
 
 MeshModule::~MeshModule()
 {
-    auto it = std::find(modules->begin(), modules->end(), this);
-    assert(it != modules->end());
-    modules->erase(it);
+    moduleRegistry().remove(this);
 }
 
 // ⚠️ **Only call once** to set the initial delay before a module starts broadcasting periodically
@@ -63,8 +124,10 @@ meshtastic_MeshPacket *MeshModule::allocAckNak(meshtastic_Routing_Error err, Nod
     // So we manually call pb_encode_to_bytes and specify routing port number
     // auto p = allocDataProtobuf(c);
     meshtastic_MeshPacket *p = router->allocForSending();
-    if (!p)
+    if (!p) {
+        LOG_WARN("Drop routing response: packet pool exhausted");
         return nullptr;
+    }
     p->decoded.portnum = meshtastic_PortNum_ROUTING_APP;
     p->decoded.payload.size =
         pb_encode_to_bytes(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), &meshtastic_Routing_msg, &c);
@@ -111,7 +174,7 @@ void MeshModule::callModules(meshtastic_MeshPacket &mp, RxSource src)
     auto ourNodeNum = nodeDB->getNodeNum();
     bool toUs = isBroadcast(mp.to) || isToUs(&mp);
 
-    for (auto i = modules->begin(); i != modules->end(); ++i) {
+    for (auto i = moduleRegistry().begin(); i != moduleRegistry().end(); ++i) {
         auto &pi = **i;
 
         pi.currentRequest = &mp;
@@ -266,13 +329,11 @@ std::vector<MeshModule *> MeshModule::GetMeshModulesWithUIFrames(int startIndex)
     // Fill with nullptr up to startIndex
     modulesWithUIFrames.resize(startIndex, nullptr);
 
-    if (modules) {
-        for (auto i = modules->begin(); i != modules->end(); ++i) {
-            auto &pi = **i;
-            if (pi.wantUIFrame()) {
-                LOG_DEBUG("%s wants a UI Frame", pi.name);
-                modulesWithUIFrames.push_back(&pi);
-            }
+    for (auto i = moduleRegistry().begin(); i != moduleRegistry().end(); ++i) {
+        auto &pi = **i;
+        if (pi.wantUIFrame()) {
+            LOG_DEBUG("%s wants a UI Frame", pi.name);
+            modulesWithUIFrames.push_back(&pi);
         }
     }
     return modulesWithUIFrames;
@@ -280,14 +341,12 @@ std::vector<MeshModule *> MeshModule::GetMeshModulesWithUIFrames(int startIndex)
 
 void MeshModule::observeUIEvents(Observer<const UIFrameEvent *> *observer)
 {
-    if (modules) {
-        for (auto i = modules->begin(); i != modules->end(); ++i) {
-            auto &pi = **i;
-            Observable<const UIFrameEvent *> *observable = pi.getUIFrameObservable();
-            if (observable != NULL) {
-                LOG_DEBUG("%s wants a UI Frame", pi.name);
-                observer->observe(observable);
-            }
+    for (auto i = moduleRegistry().begin(); i != moduleRegistry().end(); ++i) {
+        auto &pi = **i;
+        Observable<const UIFrameEvent *> *observable = pi.getUIFrameObservable();
+        if (observable != NULL) {
+            LOG_DEBUG("%s wants a UI Frame", pi.name);
+            observer->observe(observable);
         }
     }
 }
@@ -297,19 +356,17 @@ AdminMessageHandleResult MeshModule::handleAdminMessageForAllModules(const mesht
                                                                      meshtastic_AdminMessage *response)
 {
     AdminMessageHandleResult handled = AdminMessageHandleResult::NOT_HANDLED;
-    if (modules) {
-        for (auto i = modules->begin(); i != modules->end(); ++i) {
-            auto &pi = **i;
-            AdminMessageHandleResult h = pi.handleAdminMessageForModule(mp, request, response);
-            if (h == AdminMessageHandleResult::HANDLED_WITH_RESPONSE) {
-                // In case we have a response it always has priority.
-                LOG_DEBUG("Reply prepared by module '%s' of variant: %d", pi.name, response->which_payload_variant);
-                handled = h;
-            } else if ((handled != AdminMessageHandleResult::HANDLED_WITH_RESPONSE) && (h == AdminMessageHandleResult::HANDLED)) {
-                // In case the message is handled it should be populated, but will not overwrite
-                //   a result with response.
-                handled = h;
-            }
+    for (auto i = moduleRegistry().begin(); i != moduleRegistry().end(); ++i) {
+        auto &pi = **i;
+        AdminMessageHandleResult h = pi.handleAdminMessageForModule(mp, request, response);
+        if (h == AdminMessageHandleResult::HANDLED_WITH_RESPONSE) {
+            // In case we have a response it always has priority.
+            LOG_DEBUG("Reply prepared by module '%s' of variant: %d", pi.name, response->which_payload_variant);
+            handled = h;
+        } else if ((handled != AdminMessageHandleResult::HANDLED_WITH_RESPONSE) && (h == AdminMessageHandleResult::HANDLED)) {
+            // In case the message is handled it should be populated, but will not overwrite
+            //   a result with response.
+            handled = h;
         }
     }
     return handled;
