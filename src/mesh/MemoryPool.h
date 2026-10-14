@@ -8,6 +8,9 @@
 #include "PointerQueue.h"
 #include "configuration.h" // For LOG_WARN, LOG_DEBUG, LOG_HEAP
 #include "memory/MemAudit.h"
+#ifdef ARCH_ZEPHYR
+#include <zephyr/kernel.h>
+#endif
 
 template <class T> class Allocator
 {
@@ -131,6 +134,19 @@ template <class T, int MaxSize> class MemoryPool : public Allocator<T>
   private:
     T pool[MaxSize];
     bool used[MaxSize];
+#ifdef ARCH_ZEPHYR
+    struct k_spinlock lock {
+    };
+    class Guard
+    {
+        struct k_spinlock *lock;
+        k_spinlock_key_t key;
+
+      public:
+        explicit Guard(struct k_spinlock *value) : lock(value), key(k_spin_lock(value)) {}
+        ~Guard() { k_spin_unlock(lock, key); }
+    };
+#endif
 
   public:
     explicit MemoryPool(const char *auditTag = nullptr) : Allocator<T>(auditTag), pool{}, used{}
@@ -151,8 +167,18 @@ template <class T, int MaxSize> class MemoryPool : public Allocator<T>
         // Find the index of this pointer in our pool
         int index = p - pool;
         if (index >= 0 && index < MaxSize) {
+#ifdef ARCH_ZEPHYR
+            bool wasUsed;
+            {
+                Guard guard(&lock);
+                wasUsed = used[index];
+                used[index] = false;
+            }
+            assert(wasUsed);
+#else
             assert(used[index]); // Should be marked as used
             used[index] = false;
+#endif
             this->auditAdd(-(int32_t)sizeof(T));
             LOG_HEAP("Released static pool item %d at 0x%x", index, p);
         } else {
@@ -164,6 +190,24 @@ template <class T, int MaxSize> class MemoryPool : public Allocator<T>
     // Alloc some storage from our static pool
     virtual T *alloc(TickType_t maxWait) override
     {
+#ifdef ARCH_ZEPHYR
+        int selected = -1;
+        {
+            Guard guard(&lock);
+            for (int index = 0; index < MaxSize; ++index) {
+                if (!used[index]) {
+                    used[index] = true;
+                    selected = index;
+                    break;
+                }
+            }
+        }
+        if (selected >= 0) {
+            this->auditAdd((int32_t)sizeof(T));
+            LOG_HEAP("Allocated static pool item %d at 0x%x", selected, &pool[selected]);
+            return &pool[selected];
+        }
+#else
         // Find first free slot
         for (int i = 0; i < MaxSize; i++) {
             if (!used[i]) {
@@ -173,6 +217,7 @@ template <class T, int MaxSize> class MemoryPool : public Allocator<T>
                 return &pool[i];
             }
         }
+#endif
 
         // No free slots available - return nullptr instead of asserting
         LOG_WARN("No free slots available in static memory pool!");
