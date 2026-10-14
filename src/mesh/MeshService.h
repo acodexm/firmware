@@ -15,6 +15,9 @@
 #include "StaticPointerQueue.h"
 #endif
 #include "mesh-pb-constants.h"
+#if RUNA_MQTT_PROXY
+#include "transport/RelaySendAdmission.h"
+#endif
 #if defined(ARCH_PORTDUINO)
 #include "../platform/portduino/SimRadio.h"
 #endif
@@ -25,7 +28,7 @@
 #endif
 
 extern Allocator<meshtastic_QueueStatus> &queueStatusPool;
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
 extern Allocator<meshtastic_MqttClientProxyMessage> &mqttClientProxyMessagePool;
 #endif
 extern Allocator<meshtastic_ClientNotification> &clientNotificationPool;
@@ -58,7 +61,7 @@ class MeshService
 #endif
 
 // keep list of MqttClientProxyMessages to be send to the client for delivery
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
 #ifdef ARCH_PORTDUINO
     PointerQueue<meshtastic_MqttClientProxyMessage> toPhoneMqttProxyQueue;
 #else
@@ -135,9 +138,16 @@ class MeshService
     /// Return the next QueueStatus packet destined to the phone.
     meshtastic_QueueStatus *getQueueStatusForPhone() { return toPhoneQueueStatusQueue.dequeuePtr(0); }
 
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
     /// Return the next MqttClientProxyMessage packet destined to the phone.
     meshtastic_MqttClientProxyMessage *getMqttClientProxyMessageForPhone() { return toPhoneMqttProxyQueue.dequeuePtr(0); }
+#if RUNA_MQTT_PROXY
+    bool runaRelayExportQueueAvailable() const
+    {
+        return runa::transport::RelaySendAdmission::exportQueuesAvailable(toPhoneQueue.numFree(),
+                                                                          toPhoneMqttProxyQueue.numFree());
+    }
+#endif
 #endif
 
     /// Return the next ClientNotification packet destined to the phone.
@@ -149,7 +159,7 @@ class MeshService
     // Release QueueStatus packet to pool
     void releaseQueueStatusToPool(meshtastic_QueueStatus *p) { queueStatusPool.release(p); }
 
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
     // Release MqttClientProxyMessage packet to pool
     void releaseMqttClientProxyMessageToPool(meshtastic_MqttClientProxyMessage *p) { mqttClientProxyMessagePool.release(p); }
 #endif
@@ -203,7 +213,7 @@ class MeshService
     /// Send a packet to the phone
     void sendToPhone(meshtastic_MeshPacket *p);
 
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
     /// Send an MQTT message to the phone for client proxying
     virtual void sendMqttMessageToClientProxy(meshtastic_MqttClientProxyMessage *m);
 #endif

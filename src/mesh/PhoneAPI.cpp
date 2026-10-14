@@ -1,3 +1,6 @@
+#if RUNA_MQTT_PROXY
+#include "transport/RunaRelayRuntime.h"
+#endif
 #include "configuration.h"
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "GPS.h"
@@ -359,6 +362,9 @@ void PhoneAPI::handleStartConfig()
 void PhoneAPI::close()
 {
     LOG_DEBUG("PhoneAPI::close()");
+#if RUNA_MQTT_PROXY
+    runa::transport::RunaRelayRuntime::requestPause();
+#endif
     if (service->api_state == service->STATE_BLE && api_type == TYPE_BLE)
         service->api_state = service->STATE_DISCONNECTED;
     else if (service->api_state == service->STATE_WIFI && api_type == TYPE_WIFI)
@@ -381,7 +387,7 @@ void PhoneAPI::close()
 #endif
         releasePhonePacket(); // Don't leak phone packets on shutdown
         releaseQueueStatusPhonePacket();
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
         releaseMqttClientProxyPhonePacket();
 #endif
         releaseClientNotification();
@@ -490,7 +496,16 @@ bool PhoneAPI::handleToRadio(const uint8_t *buf, size_t bufLength)
 #endif
             break;
 #endif
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if RUNA_MQTT_PROXY
+        case meshtastic_ToRadio_mqttClientProxyMessage_tag:
+#ifdef MESHTASTIC_PHONEAPI_ACCESS_CONTROL
+            if (!getAdminAuthorized())
+                break;
+#endif
+            if (state == STATE_SEND_PACKETS)
+                runa::transport::RunaRelayRuntime::onProxy(toRadioScratch.mqttClientProxyMessage);
+            break;
+#elif !MESHTASTIC_EXCLUDE_MQTT
         case meshtastic_ToRadio_mqttClientProxyMessage_tag:
             LOG_DEBUG("Got MqttClientProxy message");
             if (state != STATE_SEND_PACKETS) {
@@ -1018,8 +1033,12 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
             fromRadioScratch.which_payload_variant = meshtastic_FromRadio_queueStatus_tag;
             fromRadioScratch.queueStatus = *queueStatusPacketForPhone;
             releaseQueueStatusPhonePacket();
-#if !MESHTASTIC_EXCLUDE_MQTT
-        } else if (mqttClientProxyMessageForPhone) {
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
+        } else if (mqttClientProxyMessageForPhone
+#if RUNA_MQTT_PROXY
+                   && !packetForPhone // Signed Runa sidecars must leave the packet queue before their proxy frame.
+#endif
+        ) {
 #ifdef MESHTASTIC_PHONEAPI_ACCESS_CONTROL
             if (!getAdminAuthorized()) {
                 releaseMqttClientProxyPhonePacket(); // Discard - unauthorized client
@@ -1606,7 +1625,7 @@ void PhoneAPI::advanceReplayPhase()
     }
 }
 
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
 void PhoneAPI::releaseMqttClientProxyPhonePacket()
 {
     if (mqttClientProxyMessageForPhone) {
@@ -1656,16 +1675,22 @@ bool PhoneAPI::available()
         prefetchNodeInfos();
         return true;
     case STATE_SEND_PACKETS: {
+#if RUNA_MQTT_PROXY
+        // A pending proxy must not let the early auxiliary-queue return skip
+        // the packet queue containing its signed sidecar chunks.
+        if (!packetForPhone)
+            packetForPhone = service->getForPhone();
+#endif
         if (!queueStatusPacketForPhone)
             queueStatusPacketForPhone = service->getQueueStatusForPhone();
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
         if (!mqttClientProxyMessageForPhone)
             mqttClientProxyMessageForPhone = service->getMqttClientProxyMessageForPhone();
 #endif
         if (!clientNotification)
             clientNotification = service->getClientNotificationForPhone();
         bool hasPacket = !!queueStatusPacketForPhone || !!clientNotification;
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
         hasPacket = hasPacket || !!mqttClientProxyMessageForPhone;
 #endif
 #ifdef MESHTASTIC_PHONEAPI_ACCESS_CONTROL

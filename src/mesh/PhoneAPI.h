@@ -95,7 +95,7 @@ class PhoneAPI
     meshtastic_QueueStatus *queueStatusPacketForPhone = NULL;
 
 // Keep MqttClientProxyMessage packet just as packetForPhone
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
     meshtastic_MqttClientProxyMessage *mqttClientProxyMessageForPhone = NULL;
 #endif
 
@@ -299,7 +299,7 @@ class PhoneAPI
     void advanceReplayPhase();
     bool replayPending() const { return replayPhase != REPLAY_PHASE_IDLE; }
 
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
     void releaseMqttClientProxyPhonePacket();
 #endif
 

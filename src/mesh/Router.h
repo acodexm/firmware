@@ -63,6 +63,10 @@ class Router : protected concurrency::OSThread, protected PacketHistory
      * NOTE: This method will free the provided packet (even if we return an error code)
      */
     ErrorCode sendLocal(meshtastic_MeshPacket *p, RxSource src = RX_SRC_RADIO);
+#if RUNA_MQTT_PROXY
+    // Runa resolves RF/internet admission before reporting a deferred RF error.
+    void sendLocalNak(PacketId packetId, meshtastic_Routing_Error error, ChannelIndex channel);
+#endif
 
     /** Attempt to cancel a previously sent packet.  Returns true if a packet was found we could cancel */
     bool cancelSending(NodeNum from, PacketId id);

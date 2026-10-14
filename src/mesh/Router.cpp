@@ -1,10 +1,15 @@
-#include "Router.h"
+#if RUNA_MQTT_PROXY
+#include "transport/RelayContract.h"
+#include "transport/RelaySendAdmission.h"
+#include "transport/RunaRelayRuntime.h"
+#endif
 #include "Channels.h"
 #include "CryptoEngine.h"
 #include "MeshRadio.h"
 #include "MeshService.h"
 #include "NodeDB.h"
 #include "PositionPrecision.h"
+#include "Router.h"
 #include "gps/RTC.h"
 
 #include "configuration.h"
@@ -299,9 +304,19 @@ void Router::sendAckNak(meshtastic_Routing_Error err, NodeNum to, PacketId idFro
 void Router::abortSendAndNak(meshtastic_Routing_Error err, meshtastic_MeshPacket *p)
 {
     LOG_ERROR("Error=%d, return NAK and drop packet", err);
-    sendAckNak(err, getFrom(p), p->id, p->channel);
+#if RUNA_MQTT_PROXY
+    if (!runa::transport::RelaySendAdmission::deferRadioNak(getFrom(p), p->id, static_cast<uint8_t>(err)))
+#endif
+        sendAckNak(err, getFrom(p), p->id, p->channel);
     packetPool.release(p);
 }
+
+#if RUNA_MQTT_PROXY
+void Router::sendLocalNak(PacketId packetId, meshtastic_Routing_Error error, ChannelIndex channel)
+{
+    sendAckNak(error, nodeDB->getNodeNum(), packetId, channel);
+}
+#endif
 
 void Router::setReceivedMessage()
 {
@@ -481,7 +496,10 @@ ErrorCode Router::send(meshtastic_MeshPacket *p)
             abortSendAndNak(encodeResult, p);
             return encodeResult; // FIXME - this isn't a valid ErrorCode
         }
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if RUNA_MQTT_PROXY
+        if (isFromUs(p) && p_decoded)
+            runa::transport::RunaRelayRuntime::onSend(*p, *p_decoded);
+#elif !MESHTASTIC_EXCLUDE_MQTT
         // Only publish to MQTT if we're the original transmitter of the packet
         if (moduleConfig.mqtt.enabled && isFromUs(p) && mqtt && p_decoded) {
             mqtt->onSend(*p, *p_decoded, chIndex);
@@ -1145,8 +1163,19 @@ meshtastic_Routing_Error perhapsEncode(meshtastic_MeshPacket *p)
             crypto->getPendingPublicKey(p->to, destKey)) {
             haveDestKey = true;
         }
-        // We may want to retool things so we can send a PKC packet when the client specifies a key and nodenum, even if the node
-        // is not in the local nodedb
+#if RUNA_MQTT_PROXY
+        // Device-owned full-key routes remain usable beyond radio discovery.
+        // Scope the key to this encryption; never replace the stored identity.
+        if (isFromUs(p) && p->pki_encrypted && p->public_key.size == 32) {
+            if (!runa::transport::relay::validDestinationKey(p->to, p->public_key.bytes, haveDestKey ? destKey.bytes : nullptr))
+                return meshtastic_Routing_Error_PKI_SEND_FAIL_PUBLIC_KEY;
+            if (!haveDestKey) {
+                destKey.size = 32;
+                memcpy(destKey.bytes, p->public_key.bytes, 32);
+                haveDestKey = true;
+            }
+        }
+#endif
         if (wouldEncryptWithPKC(p, chIndex, haveDestKey)) {
             LOG_DEBUG("Use PKI!");
             if (numbytes + MESHTASTIC_HEADER_LENGTH + MESHTASTIC_PKC_OVERHEAD > MAX_LORA_PAYLOAD_LEN)

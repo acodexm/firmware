@@ -1,3 +1,6 @@
+#if RUNA_MQTT_PROXY
+#include "transport/RunaRelayDomain.h"
+#endif
 #include "configuration.h"
 
 #if !MESHTASTIC_EXCLUDE_GPS
@@ -52,7 +55,7 @@ MeshService *service;
 #ifndef MAX_MQTT_PROXY_MESSAGES
 #define MAX_MQTT_PROXY_MESSAGES 16
 #endif
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
 static MemoryPool<meshtastic_MqttClientProxyMessage, MAX_MQTT_PROXY_MESSAGES> staticMqttClientProxyMessagePool;
 #endif
 
@@ -71,7 +74,7 @@ Allocator<meshtastic_ClientNotification> &clientNotificationPool = staticClientN
 Allocator<meshtastic_QueueStatus> &queueStatusPool = staticQueueStatusPool;
 
 #include "PositionPrecision.h"
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
 Allocator<meshtastic_MqttClientProxyMessage> &mqttClientProxyMessagePool = staticMqttClientProxyMessagePool;
 #endif
 
@@ -80,7 +83,7 @@ Allocator<meshtastic_MqttClientProxyMessage> &mqttClientProxyMessagePool = stati
 MeshService::MeshService()
 #ifdef ARCH_PORTDUINO
     : toPhoneQueue(MAX_RX_TOPHONE), toPhoneQueueStatusQueue(MAX_RX_QUEUESTATUS_TOPHONE),
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
       toPhoneMqttProxyQueue(MAX_RX_MQTTPROXY_TOPHONE),
 #endif
       toPhoneClientNotificationQueue(MAX_RX_NOTIFICATION_TOPHONE)
@@ -125,6 +128,10 @@ int MeshService::handleFromRadio(const meshtastic_MeshPacket *mp)
         }
     }
 
+#if RUNA_MQTT_PROXY
+    if (runa::transport::RunaRelayDomain::deferPhonePacket(*mp))
+        return 0; // The device history owner projects text only after durable admission.
+#endif
     printPacket("Forwarding to phone", mp);
     auto *copy = packetPool.allocCopy(*mp);
     if (!copy) {
@@ -510,7 +517,7 @@ void MeshService::sendToPhone(meshtastic_MeshPacket *p)
     fromNum++;
 }
 
-#if !MESHTASTIC_EXCLUDE_MQTT
+#if !MESHTASTIC_EXCLUDE_MQTT || RUNA_MQTT_PROXY
 void MeshService::sendMqttMessageToClientProxy(meshtastic_MqttClientProxyMessage *m)
 {
     LOG_DEBUG("Send mqtt message on topic '%s' to client for proxy", m->topic);
