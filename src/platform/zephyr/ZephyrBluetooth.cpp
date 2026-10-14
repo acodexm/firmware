@@ -28,6 +28,9 @@
 #include "mesh/PhoneAPI.h"
 #include "mesh/mesh-pb-constants.h"
 #include "target_specific.h"
+#if RUNA_MQTT_PROXY
+#include "transport/RunaRelayRuntime.h"
+#endif
 
 #include <atomic>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -62,6 +65,10 @@ static const struct bt_uuid_128 logradio_uuid = BT_UUID_INIT_128(LOGRADIO_UUID_V
 
 static struct bt_conn *active_conn = nullptr;
 static K_MUTEX_DEFINE(ble_mutex);
+// Protect cached PhoneAPI objects, scratch buffers and configuration lifecycle.
+// BT RX reads must never wait for a main-side notification/configuration call.
+static K_MUTEX_DEFINE(phoneApiMutex);
+static std::atomic_bool closeRequested{false};
 
 // Take a reference to active_conn under ble_mutex. Returns nullptr if there is
 // no active connection. Caller MUST bt_conn_unref() when done.
@@ -146,6 +153,13 @@ static size_t pendingToRadioHead = 0;
 static size_t pendingToRadioTail = 0;
 static size_t pendingToRadioCount = 0;
 
+static void clearPendingToRadio()
+{
+    k_mutex_lock(&pendingToRadioMutex, K_FOREVER);
+    pendingToRadioHead = pendingToRadioTail = pendingToRadioCount = 0;
+    k_mutex_unlock(&pendingToRadioMutex);
+}
+
 // ── BluetoothPhoneAPI
 // ─────────────────────────────────────────────────────────
 
@@ -156,6 +170,34 @@ class BluetoothPhoneAPI : public PhoneAPI
 
   public:
     BluetoothPhoneAPI() { api_type = TYPE_BLE; }
+    size_t getFromRadio(uint8_t *buf)
+    {
+        if (k_mutex_lock(&phoneApiMutex, K_NO_WAIT) != 0)
+            return 0;
+        const size_t length = closeRequested.load() ? 0 : PhoneAPI::getFromRadio(buf);
+        k_mutex_unlock(&phoneApiMutex);
+        return length;
+    }
+    bool handleToRadio(const uint8_t *buf, size_t len) override
+    {
+        k_mutex_lock(&phoneApiMutex, K_FOREVER);
+        const bool handled = !closeRequested.load() && PhoneAPI::handleToRadio(buf, len);
+        k_mutex_unlock(&phoneApiMutex);
+        return handled;
+    }
+    void close() override
+    {
+        k_mutex_lock(&phoneApiMutex, K_FOREVER);
+        PhoneAPI::close();
+        k_mutex_unlock(&phoneApiMutex);
+    }
+    int onNotify(uint32_t newValue) override
+    {
+        k_mutex_lock(&phoneApiMutex, K_FOREVER);
+        const int result = closeRequested.load() ? 0 : PhoneAPI::onNotify(newValue);
+        k_mutex_unlock(&phoneApiMutex);
+        return result;
+    }
 };
 
 static BluetoothPhoneAPI *phoneAPI = nullptr;
@@ -219,6 +261,9 @@ static ssize_t write_toradio(struct bt_conn *conn, const struct bt_gatt_attr *at
     if (len > sizeof(toRadioBytes) || len > MAX_TO_FROM_RADIO_SIZE) {
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
+
+    if (closeRequested.load())
+        return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
 
     if (lastToRadioLen == len && memcmp(lastToRadio, buf, len) == 0)
         return (ssize_t)len;
@@ -398,6 +443,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 
     memset(lastToRadio, 0, sizeof(lastToRadio));
     lastToRadioLen = 0;
+    fromRadioLen = 0;
 
     char addr[BT_ADDR_LE_STR_LEN];
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
@@ -429,16 +475,15 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
     fromnumCccValue.store(0);
     logradioCccValue.store(0);
 
-    if (phoneAPI) {
-        phoneAPI->close();
-    }
+    // Closing cached PhoneAPI objects belongs to the cooperative owner. Waiting
+    // for its API mutex here can deadlock a notification waiting for BT RX.
+    closeRequested.store(true);
+#if RUNA_MQTT_PROXY
+    runa::transport::RunaRelayRuntime::requestPause();
+#endif
     memset(lastToRadio, 0, sizeof(lastToRadio));
     lastToRadioLen = 0;
-    k_mutex_lock(&pendingToRadioMutex, K_FOREVER);
-    pendingToRadioHead = 0;
-    pendingToRadioTail = 0;
-    pendingToRadioCount = 0;
-    k_mutex_unlock(&pendingToRadioMutex);
+    clearPendingToRadio();
 
     meshtastic::BluetoothStatus newStatus(meshtastic::BluetoothStatus::ConnectionState::DISCONNECTED);
     bluetoothStatus->updateStatus(&newStatus);
@@ -577,6 +622,17 @@ class BleDeferredThread : public concurrency::OSThread
   protected:
     int32_t runOnce() override
     {
+        // Consume disconnect before dispatching old input. The recursive mutex
+        // also covers base close() reached from notification timeout handling.
+        k_mutex_lock(&phoneApiMutex, K_FOREVER);
+        if (closeRequested.load()) {
+            clearPendingToRadio();
+            if (phoneAPI)
+                phoneAPI->close();
+            closeRequested.store(false);
+        }
+        k_mutex_unlock(&phoneApiMutex);
+
         // Snapshot the pending ToRadio buffer under the mutex, then release
         // the lock before calling into handleToRadio (which can be slow and
         // must not block the BT RX thread producer).

@@ -323,6 +323,7 @@ class PhoneAPI
     bool handleLockdownAuthInline(const meshtastic_LockdownAuth &la);
 #endif
 
+  protected:
     /// If the mesh service tells us fromNum has changed, tell the phone
     virtual int onNotify(uint32_t newValue) override;
 
