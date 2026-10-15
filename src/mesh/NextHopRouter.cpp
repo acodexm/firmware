@@ -1,5 +1,8 @@
-#include "NextHopRouter.h"
+#if RUNA_MQTT_PROXY
+#include "transport/RelaySendAdmission.h"
+#endif
 #include "MeshTypes.h"
+#include "NextHopRouter.h"
 #include "meshUtils.h"
 #if !MESHTASTIC_EXCLUDE_TRACEROUTE
 #include "modules/TraceRouteModule.h"
@@ -38,6 +41,9 @@ bool NextHopRouter::relayOpaquePacket(const meshtastic_MeshPacket *p)
 PendingPacket::PendingPacket(meshtastic_MeshPacket *p, uint8_t numRetransmissions)
 {
     packet = p;
+#if RUNA_MQTT_PROXY
+    runaRadioFirst = runa::transport::RelaySendAdmission::holdInternet(getFrom(p), p->id);
+#endif
     this->numRetransmissions = numRetransmissions - 1; // We subtract one, because we assume the user just did the first send
 }
 
@@ -405,6 +411,12 @@ int32_t NextHopRouter::doRetransmissions()
                 stopRetransmission(it->first);
                 stillValid = false; // just deleted it
             } else {
+#if RUNA_MQTT_PROXY
+                // This is the same RF packet, not a new domain fallback attempt.
+                // Retry scopes preserve ordinary NAK propagation: no Gateway is
+                // present here to resolve a deferred admission error.
+                runa::transport::RelaySendAdmission admission(getFrom(p.packet), p.packet->id, p.runaRadioFirst, false);
+#endif
                 LOG_DEBUG("Sending retransmission fr=0x%08x,to=0x%08x,id=0x%08x, tries left=%d", p.packet->from, p.packet->to,
                           p.packet->id, p.numRetransmissions);
 

@@ -38,6 +38,10 @@ struct PendingPacket {
 
     /** Starts at NUM_RETRANSMISSIONS -1 and counts down.  Once zero it will be removed from the list */
     uint8_t numRetransmissions = 0;
+#if RUNA_MQTT_PROXY
+    // Keep the original domain send policy through automatic RF retries.
+    bool runaRadioFirst = false;
+#endif
 
     PendingPacket() {}
     explicit PendingPacket(meshtastic_MeshPacket *p, uint8_t numRetransmissions);
