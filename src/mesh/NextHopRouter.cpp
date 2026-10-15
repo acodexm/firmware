@@ -1,8 +1,8 @@
 #if RUNA_MQTT_PROXY
 #include "transport/RelaySendAdmission.h"
 #endif
-#include "MeshTypes.h"
 #include "NextHopRouter.h"
+#include "MeshTypes.h"
 #include "meshUtils.h"
 #if !MESHTASTIC_EXCLUDE_TRACEROUTE
 #include "modules/TraceRouteModule.h"
