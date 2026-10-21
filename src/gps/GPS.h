@@ -4,6 +4,7 @@
 
 #include <memory>
 
+#include "GPSProbeScan.h"
 #include "GPSStatus.h"
 #include "GpioLogic.h"
 #include "Observer.h"
@@ -189,8 +190,7 @@ class GPS : private concurrency::OSThread
     uint32_t rx_gpio = 0;
     uint32_t tx_gpio = 0;
 
-    uint8_t speedSelect = 0;
-    uint8_t probeTries = 0;
+    GPSProbeScan probeScan;
     // Cache file is successfully loaded.
     bool hasProbeCache = false;
     // Ensures cached probe is attempted once per boot.

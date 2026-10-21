@@ -815,6 +815,9 @@ bool GPS::verifyCachedProbePresence()
  */
 bool GPS::setup()
 {
+    if (probeScan.exhausted)
+        return true;
+
     if (!didSerialInit) {
         int msglen = 0;
         if (tx_gpio && gnssModel == GNSS_MODEL_UNKNOWN) {
@@ -826,34 +829,31 @@ bool GPS::setup()
                 triedProbeCache = true;
                 if (!verifyCachedProbePresence()) {
                     currentStep = 0;
-                    speedSelect = 0;
-                    probeTries = 0;
+                    probeScan.reset();
                 }
             }
 
-            if (gnssModel == GNSS_MODEL_UNKNOWN && probeTries < GPS_PROBETRIES) {
-                // No usable cache: walk common baud rates first.
-                gnssModel = probe(serialSpeeds[speedSelect]);
-                if (gnssModel != GNSS_MODEL_UNKNOWN) {
-                    detectedBaud = serialSpeeds[speedSelect];
-                } else if (currentStep == 0 && ++speedSelect == array_count(serialSpeeds)) {
-                    speedSelect = 0;
-                    ++probeTries;
-                }
-            }
-            // Rare Serial Speeds
-#ifndef CONFIG_IDF_TARGET_ESP32C6
-            else if (gnssModel == GNSS_MODEL_UNKNOWN && probeTries == GPS_PROBETRIES) {
-                // Then try less common baud rates before giving up.
-                gnssModel = probe(rareSerialSpeeds[speedSelect]);
-                if (gnssModel != GNSS_MODEL_UNKNOWN) {
-                    detectedBaud = rareSerialSpeeds[speedSelect];
-                } else if (currentStep == 0 && ++speedSelect == array_count(rareSerialSpeeds)) {
-                    LOG_WARN("Give up on GPS probe and set to %d", GPS_BAUDRATE);
-                    return true;
-                }
-            }
+            if (gnssModel == GNSS_MODEL_UNKNOWN) {
+#ifdef CONFIG_IDF_TARGET_ESP32C6
+                constexpr bool includeRare = false;
+#else
+                constexpr bool includeRare = true;
 #endif
+                int baud = 0;
+                if (!probeScan.selectBaud(serialSpeeds, rareSerialSpeeds, GPS_PROBETRIES, includeRare, baud))
+                    return true;
+                gnssModel = probe(baud);
+                if (gnssModel != GNSS_MODEL_UNKNOWN) {
+                    detectedBaud = baud;
+                } else if (currentStep == 0) {
+                    probeScan.completeFailedBaud(array_count(serialSpeeds), array_count(rareSerialSpeeds), GPS_PROBETRIES,
+                                                 includeRare);
+                    if (probeScan.exhausted) {
+                        LOG_WARN("Give up on GPS probe and set to %d", GPS_BAUDRATE);
+                        return true;
+                    }
+                }
+            }
         }
 
         if (gnssModel != GNSS_MODEL_UNKNOWN) {
@@ -2276,6 +2276,11 @@ bool GPS::whileActive()
 }
 void GPS::enable()
 {
+    // A missing receiver is terminal for this boot. A new acquisition demand
+    // must not resume an exhausted baud cursor or repeatedly power-cycle it.
+    if (!probeScan.canEnable())
+        return;
+
     // Clear the old scheduling info (reset the lock-time prediction)
     scheduling.reset();
 
