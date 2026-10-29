@@ -3,6 +3,9 @@
 #include "Status.h"
 #include "configuration.h"
 #include <Arduino.h>
+#ifdef RUNA_GNSS_GSA_QUALITY
+#include "runa/gps/GnssObservation.h"
+#endif
 
 namespace meshtastic
 {
@@ -24,12 +27,21 @@ class GPSStatus : public Status
 
     /// Time of last valid GPS fix (millis since boot)
     uint32_t lastFixMillis = 0;
+#ifdef RUNA_GNSS_GSA_QUALITY
+    runa::gps::GnssObservation observation;
+#endif
 
   public:
     GPSStatus() { statusType = STATUS_TYPE_GPS; }
 
     // preferred method
-    GPSStatus(bool hasLock, bool isConnected, bool isPowerSaving, const meshtastic_Position &pos) : Status()
+    GPSStatus(bool hasLock, bool isConnected, bool isPowerSaving, const meshtastic_Position &pos
+#ifdef RUNA_GNSS_GSA_QUALITY
+              ,
+              const runa::gps::GnssObservation &source = {}
+#endif
+              )
+        : Status()
     {
         this->hasLock = hasLock;
         this->isConnected = isConnected;
@@ -37,12 +49,19 @@ class GPSStatus : public Status
 
         // all-in-one struct copy
         this->p = pos;
+#ifdef RUNA_GNSS_GSA_QUALITY
+        this->observation = source;
+#endif
     }
 
     GPSStatus(const GPSStatus &);
     GPSStatus &operator=(const GPSStatus &);
 
     void observe(Observable<const GPSStatus *> *source) { statusObserver.observe(source); }
+
+#ifdef RUNA_GNSS_GSA_QUALITY
+    const runa::gps::GnssObservation &getObservation() const { return observation; }
+#endif
 
     bool getHasLock() const { return hasLock; }
 
@@ -104,10 +123,23 @@ class GPSStatus : public Status
         // Only update the status if values have actually changed
         bool isDirty = matches(newStatus);
 
+#ifdef RUNA_GNSS_GSA_QUALITY
+        // Quality/course publication and sub-second receiver epochs can share
+        // the legacy whole-second timestamp. Only reused source identity with
+        // changed geometry violates Runa's immutable-observation contract.
+        if (observation.hasPosition && newStatus->observation.hasPosition &&
+            observation.generation == newStatus->observation.generation &&
+            observation.sequence == newStatus->observation.sequence &&
+            (observation.latitudeE7 != newStatus->observation.latitudeE7 ||
+             observation.longitudeE7 != newStatus->observation.longitudeE7)) {
+            LOG_ERROR("BUG: GNSS observation identity reused for changed coordinates");
+        }
+#else
         if (isDirty && p.timestamp && (newStatus->p.timestamp == p.timestamp)) {
             // We can NEVER be in two locations at the same time! (also PR #886)
             LOG_ERROR("BUG: Positional timestamp unchanged from prev solution");
         }
+#endif
 
         initialized = true;
         hasLock = newStatus->hasLock;
@@ -116,9 +148,15 @@ class GPSStatus : public Status
         // A stationary receiver still produces fresh solutions. Keep freshness
         // independent from observer dirtiness so consumers can reject cached fixes
         // without forcing position/UI notifications every second.
+#ifdef RUNA_GNSS_GSA_QUALITY
+        observation = newStatus->observation;
+        if (observation.hasPosition)
+            lastFixMillis = observation.positionReceivedAtMs;
+#else
         if (hasLock) {
             lastFixMillis = millis();
         }
+#endif
 
         p = newStatus->p;
 

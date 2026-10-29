@@ -9,6 +9,9 @@
 #include "GpioLogic.h"
 #include "Observer.h"
 #include "TinyGPS++.h"
+#ifdef RUNA_GNSS_GSA_QUALITY
+#include "runa/gps/NmeaObservation.h"
+#endif
 #include "concurrency/OSThread.h"
 #include "input/RotaryEncoderInterruptImpl1.h"
 #include "input/UpDownInterruptImpl1.h"
@@ -172,6 +175,9 @@ class GPS : private concurrency::OSThread
     GnssModel_t cachedProbeModel = GNSS_MODEL_UNKNOWN;
 
     TinyGPSPlus reader;
+#ifdef RUNA_GNSS_GSA_QUALITY
+    runa::gps::NmeaObservation sourceObservation;
+#endif
     uint8_t fixQual = 0; // fix quality from GPGGA
     uint32_t lastChecksumFailCount = 0;
     uint8_t currentStep = 0;

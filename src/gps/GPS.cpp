@@ -1172,6 +1172,14 @@ void GPS::setPowerState(GPSPowerState newState, uint32_t sleepTime)
     // Update the stored GPSPowerstate, and create local copies
     GPSPowerState oldState = powerState;
     powerState = newState;
+#ifdef RUNA_GNSS_GSA_QUALITY
+    // A known cold receiver start creates a new source generation. Ordinary
+    // status publication and soft standby do not create a receiver restart.
+    if ((newState == GPS_ACTIVE || newState == GPS_IDLE) && (oldState == GPS_OFF || oldState == GPS_HARDSLEEP)) {
+        sourceObservation.restart();
+        gsaQualityParser = {};
+    }
+#endif
     LOG_INFO("GPS power state move from %s to %s", getGPSPowerStateString(oldState), getGPSPowerStateString(newState));
 
     switch (newState) {
@@ -1433,7 +1441,12 @@ void GPS::publishUpdate()
         LOG_DEBUG("Publish pos@%x:2, hasVal=%d, Sats=%d, GPSlock=%d", p.timestamp, hasValidLocation, p.sats_in_view, hasLock());
 
         // Notify any status instances that are observing us
-        const meshtastic::GPSStatus status = meshtastic::GPSStatus(hasValidLocation, isConnected(), isPowerSaving(), p);
+        const meshtastic::GPSStatus status = meshtastic::GPSStatus(hasValidLocation, isConnected(), isPowerSaving(), p
+#ifdef RUNA_GNSS_GSA_QUALITY
+                                                                   ,
+                                                                   sourceObservation.current()
+#endif
+        );
         newStatus.notifyObservers(&status);
         if (config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED) {
             positionModule->handleNewPosition();
@@ -2018,6 +2031,7 @@ std::unique_ptr<GPS> GPS::createGps()
     return new_gps;
 }
 
+#ifndef RUNA_GNSS_GSA_QUALITY
 static int32_t toDegInt(RawDegrees d)
 {
     int32_t degMult = 10000000; // 1e7
@@ -2026,6 +2040,7 @@ static int32_t toDegInt(RawDegrees d)
         r *= -1;
     return r;
 }
+#endif
 
 /**
  * Perform any processing that should be done only while the GPS is awake and looking for a fix.
@@ -2096,6 +2111,15 @@ bool GPS::lookForLocation()
     fixType = atoi(gsafixtype.value()); // will set to zero if no data
 #endif
 
+#ifdef RUNA_GNSS_GSA_QUALITY
+    runa::gps::GsaQuality currentQuality;
+    const bool hasCurrentQuality = gsaQualityParser.current(millis(), GPS_SOL_EXPIRY_MS, currentQuality);
+    if (sourceObservation.setQuality(hasCurrentQuality ? currentQuality.pdopCenti : 0,
+                                     hasCurrentQuality ? currentQuality.observedAtMs : 0,
+                                     hasCurrentQuality && currentQuality.fixType == 3U))
+        shouldPublish = true;
+#endif
+
     // check if GPS has an acceptable lock
     if (!hasLock())
         return false;
@@ -2110,6 +2134,38 @@ bool GPS::lookForLocation()
               reader.date.age(), reader.time.age());
 #endif // GPS_DEBUG
 
+#ifdef RUNA_GNSS_GSA_QUALITY
+    // Runa's epoch adapter snapshots each validated sentence before the serial
+    // batch can overwrite its time/course. Metadata never advances position.
+    const auto &observation = sourceObservation.current();
+    const bool newPosition = sourceObservation.consumePositionUpdate();
+    if (!observation.hasPosition || static_cast<uint32_t>(millis() - observation.positionReceivedAtMs) >= GPS_SOL_EXPIRY_MS)
+        return false;
+    p.location_source = meshtastic_Position_LocSource_LOC_INTERNAL;
+    p.latitude_i = observation.latitudeE7;
+    p.longitude_i = observation.longitudeE7;
+    p.PDOP = observation.dop;
+    p.fix_type = observation.dop != 0 ? 3 : 0;
+    p.sats_in_view = observation.satellites;
+    p.fix_quality = fixQual;
+    p.ground_track = observation.hasCourse ? static_cast<uint32_t>(observation.courseDegrees * 100000.0f) : 0;
+    // Position.ground_speed is cm/s; TinyGPS++ speed is knots/100.
+    p.ground_speed = observation.hasSpeed ? static_cast<uint32_t>(observation.speedMps * 100.0f) : 0;
+    p.altitude_geoidal_separation = reader.geoidHeight.meters();
+    p.altitude_hae = reader.altitude.meters() + p.altitude_geoidal_separation;
+    p.altitude = reader.altitude.meters();
+    p.HDOP = reader.hdop.isValid() && reader.hdop.age() < GPS_SOL_EXPIRY_MS ? reader.hdop.value() : 0;
+    struct tm t = {};
+    t.tm_sec = observation.receiverTimeCenti / 100 % 100;
+    t.tm_min = observation.receiverTimeCenti / 10000 % 100;
+    t.tm_hour = observation.receiverTimeCenti / 1000000;
+    t.tm_mday = observation.receiverDate / 10000;
+    t.tm_mon = observation.receiverDate / 100 % 100 - 1;
+    const uint32_t year = observation.receiverDate % 100;
+    t.tm_year = year + (year >= 80 ? 0 : 100);
+    p.timestamp = gm_mktime(&t);
+    return newPosition;
+#else
     // Is this a new point or are we re-reading the previous one?
     if (!reader.location.isUpdated() && !reader.altitude.isUpdated())
         return false;
@@ -2214,6 +2270,7 @@ bool GPS::lookForLocation()
     }
 
     return true;
+#endif
 }
 
 bool GPS::hasLock()
@@ -2257,10 +2314,26 @@ bool GPS::whileActive()
 #ifdef GPS_DEBUG
         debugmsg += vformat("%c", (c >= 32 && c <= 126) ? c : '.');
 #endif
-        isValid |= reader.encode(c);
+        const bool decoded = reader.encode(c);
+        isValid |= decoded;
+#ifdef RUNA_GNSS_GSA_QUALITY
+        if (decoded) {
+            runa::gps::GsaQuality quality;
+            const uint32_t nowMs = millis();
+            const bool hasQuality = gsaQualityParser.current(nowMs, GPS_SOL_EXPIRY_MS, quality);
+            const bool qualityChanged = sourceObservation.setQuality(
+                hasQuality ? quality.pdopCenti : 0, hasQuality ? quality.observedAtMs : 0, hasQuality && quality.fixType == 3U);
+            if (sourceObservation.sentence(reader, nowMs) || qualityChanged)
+                shouldPublish = true;
+        }
+#endif
         if (charsInBuf > sizeof(UBXscratch) - 10 || c == '\r') {
             if (strnstr((char *)UBXscratch, "$GPTXT,01,01,02,u-blox ag - www.u-blox.com*50", charsInBuf)) {
                 rebootsSeen++;
+#ifdef RUNA_GNSS_GSA_QUALITY
+                sourceObservation.restart();
+                gsaQualityParser = {};
+#endif
             }
             charsInBuf = 0;
         } else {
